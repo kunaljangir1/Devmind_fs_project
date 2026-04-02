@@ -9,7 +9,7 @@
 
 /** Base URL for the Raiden AI API */
 export const RAIDEN_BASE_URL =
-    process.env.RAIDEN_API_BASE_URL || "https://api.raiden.ovh/ai/generate";
+    process.env.RAIDEN_API_BASE_URL || "http://localhost:8000/api";
 
 /** AI model to use for all Raiden API calls */
 export const RAIDEN_MODEL = process.env.RAIDEN_MODEL || "claude-sonnet-4";
