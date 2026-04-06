@@ -1,8 +1,8 @@
 /**
- * app/api/agents/route.ts — Multi-Agent Code Analysis Endpoint (Raiden API)
+ * app/api/agents/route.ts — Multi-Agent Code Analysis Endpoint (Gemini AI)
  *
  * Dispatches 4 specialized AI agents in TRUE PARALLEL via Promise.allSettled().
- * Each agent gets its own prompt, makes an independent call to the Raiden API,
+ * Each agent gets its own prompt, makes an independent call to the Gemini API,
  * and handles failures independently (error isolation).
  *
  * Agents:
@@ -18,8 +18,12 @@
  * }
  */
 
-import { raidenAI, buildAgentPrompt } from "@/lib/raiden";
-import { withTimeout, TimeoutError } from "@/lib/retry";
+// ── Old Raiden imports (commented out) ──
+// import { raidenAI, buildAgentPrompt } from "@/lib/raiden";
+// import { withTimeout, TimeoutError } from "@/lib/retry";
+
+// ── New Gemini imports ──
+import { geminiAI, buildAgentPrompt } from "@/lib/gemini";
 import { MAX_CODE_LENGTH, AGENT_TIMEOUT_MS } from "@/lib/config";
 
 // ─────────────────────────────────────────────
@@ -144,12 +148,12 @@ function validateRequest(body: unknown): string {
 }
 
 // ─────────────────────────────────────────────
-// Single Agent Runner
+// Single Agent Runner (Now using Gemini)
 // ─────────────────────────────────────────────
 
 /**
- * Runs a single agent by building its prompt and calling the Raiden API.
- * Wrapped in a timeout to prevent any single agent from blocking indefinitely.
+ * Runs a single agent by building its prompt and calling the Gemini API.
+ * Each agent call has a timeout via AbortController for safety.
  */
 async function runSingleAgent(
     agent: AgentDefinition,
@@ -161,19 +165,16 @@ async function runSingleAgent(
         // Build a structured prompt for this agent
         const prompt = buildAgentPrompt(agent.role, code, agent.instructions);
 
-        // Call Raiden API with per-agent timeout
-        const result = await withTimeout(
-            (signal: AbortSignal) => {
-                // We can't pass signal directly to raidenAI since it uses its own timeout,
-                // but we check if aborted before processing
-                if (signal.aborted) {
-                    throw new Error(`Agent "${agent.id}" was aborted`);
-                }
-                return raidenAI(prompt, true); // new_session=true for independent agent context
-            },
-            AGENT_TIMEOUT_MS,
-            `Agent: ${agent.name}`
-        );
+        // Call Gemini API with a timeout wrapper
+        const result = await Promise.race([
+            geminiAI(prompt),
+            new Promise<never>((_, reject) =>
+                setTimeout(
+                    () => reject(new Error(`Agent "${agent.name}" timed out after ${AGENT_TIMEOUT_MS / 1000}s`)),
+                    AGENT_TIMEOUT_MS
+                )
+            ),
+        ]);
 
         const durationMs = Date.now() - startTime;
 
@@ -188,11 +189,9 @@ async function runSingleAgent(
     } catch (error: unknown) {
         const durationMs = Date.now() - startTime;
         const errorMessage =
-            error instanceof TimeoutError
-                ? `Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s`
-                : error instanceof Error
-                    ? error.message
-                    : "Unknown error occurred";
+            error instanceof Error
+                ? error.message
+                : "Unknown error occurred";
 
         return {
             id: agent.id,
@@ -231,7 +230,6 @@ export async function POST(request: Request): Promise<Response> {
         /**
          * Promise.allSettled() ensures error isolation:
          * if one agent fails (timeout, API error), the others still return.
-         * This is superior to Promise.all() which would reject on first failure.
          */
         const results = await Promise.allSettled(
             AGENTS.map((agent) => runSingleAgent(agent, code))
@@ -245,8 +243,7 @@ export async function POST(request: Request): Promise<Response> {
                 return result.value;
             }
 
-            // This shouldn't happen since runSingleAgent catches its own errors,
-            // but we handle it for safety
+            // Safety fallback — shouldn't happen since runSingleAgent catches its own errors
             const agent = AGENTS[index];
             return {
                 id: agent.id,

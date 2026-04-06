@@ -68,26 +68,41 @@ router.post('/:id/messages', async (req, res) => {
     const stmt = db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)');
     stmt.run(req.params.id, 'user', content);
 
-// Integrate Raiden API for AI response
+    // ── Old Raiden API integration (commented out) ──
+    // let aiResponse = "Error communicating with AI.";
+    // try {
+    //   const apiUrlString = process.env.RAIDEN_API_URL;
+    //   if (!apiUrlString) {
+    //      console.error("Missing RAIDEN_API_URL in .env");
+    //      throw new Error("Missing API config");
+    //   }
+    //   const apiUrl = new URL(apiUrlString);
+    //   apiUrl.searchParams.append('text', content);
+    //   const response = await fetch(apiUrl.toString());
+    //   if (response.ok) {
+    //     const data = await response.json();
+    //     if (data && data.success) {
+    //       aiResponse = data.generated_text;
+    //     }
+    //   }
+    // } catch (apiError) {
+    //   console.error('Raiden API Error:', apiError);
+    // }
+
+    // ── New Gemini AI integration ──
     let aiResponse = "Error communicating with AI.";
     try {
-      const apiUrlString = process.env.RAIDEN_API_URL;
-      if (!apiUrlString) {
-         console.error("Missing RAIDEN_API_URL in .env");
-         throw new Error("Missing API config");
-      }
-      const apiUrl = new URL(apiUrlString);
-      apiUrl.searchParams.append('text', content);
-      
-      const response = await fetch(apiUrl.toString());
-      if (response.ok) {
-        const data = await response.json();
-        if (data && data.success) {
-          aiResponse = data.generated_text;
-        }
+      const { GoogleGenAI } = require("@google/genai");
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const geminiResult = await ai.models.generateContent({
+        model: "gemini-2.5-flash-lite",
+        contents: content,
+      });
+      if (geminiResult.text) {
+        aiResponse = geminiResult.text;
       }
     } catch (apiError) {
-      console.error('Raiden API Error:', apiError);
+      console.error('Gemini API Error:', apiError);
     }
     
     const stmtAi = db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)');
@@ -103,4 +118,38 @@ router.post('/:id/messages', async (req, res) => {
   }
 });
 
+// Rename a chat
+router.patch('/:id', (req, res) => {
+  try {
+    const { title } = req.body;
+    if (!title || !title.trim()) return res.status(400).json({ error: 'Title is required' });
+    const chatStmt = db.prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?');
+    const chat = chatStmt.get(req.params.id, req.user.id);
+    if (!chat) return res.status(404).json({ error: 'Chat not found' });
+    db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(title.trim(), req.params.id);
+    res.json({ id: req.params.id, title: title.trim() });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error updating chat' });
+  }
+});
+
+// Delete a chat and all its messages
+router.delete('/:id', (req, res) => {
+  try {
+    const chatStmt = db.prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?');
+    const chat = chatStmt.get(req.params.id, req.user.id);
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+    db.prepare('DELETE FROM messages WHERE chat_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM chats WHERE id = ?').run(req.params.id);
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error deleting chat' });
+  }
+});
+
 module.exports = router;
+

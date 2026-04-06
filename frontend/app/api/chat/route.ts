@@ -1,19 +1,23 @@
 /**
- * app/api/chat/route.ts — Streaming Chat API Endpoint (Raiden API)
+ * app/api/chat/route.ts — Streaming Chat API Endpoint (Gemini AI)
  *
  * Receives the full conversation history from the client, builds a
- * structured prompt from the history, calls the Raiden AI API, and
+ * structured prompt from the history, calls the Gemini AI API, and
  * returns a simulated streaming response (word-by-word typewriter).
  *
  * ARCHITECTURE:
  * - POST method accepts { messages, newSession } body
  * - Builds a single prompt from conversation history (last 10 messages)
  * - Prepends the DevMind system prompt for consistent persona
- * - Uses raidenAIStream() for simulated streaming response
+ * - Uses geminiAIStream() for simulated streaming response
  * - Returns ReadableStream with Content-Type: text/plain
  */
 
-import { raidenAIStream } from "@/lib/raiden";
+// ── Old Raiden import (commented out) ──
+// import { raidenAIStream } from "@/lib/raiden";
+
+// ── New Gemini import ──
+import { geminiAIStream } from "@/lib/gemini";
 import { DEVMIND_SYSTEM_PROMPT, MAX_CHAT_MESSAGES } from "@/lib/config";
 
 /**
@@ -79,9 +83,6 @@ function validateRequest(body: unknown): { messages: Message[]; newSession: bool
  *   ...
  *
  *   Current question: [last user message]
- *
- * The last user message is separated as "Current question" to
- * clearly signal what the model should respond to.
  */
 function buildChatPrompt(messages: Message[]): string {
     const parts: string[] = [DEVMIND_SYSTEM_PROMPT, ""];
@@ -105,25 +106,25 @@ function buildChatPrompt(messages: Message[]): string {
 }
 
 /**
- * POST /api/chat — Streaming chat endpoint using Raiden API.
+ * POST /api/chat — Streaming chat endpoint using Gemini AI.
  *
  * Flow:
  * 1. Parse and validate the request body
  * 2. Build a structured prompt from conversation history
- * 3. Call raidenAIStream() to get a simulated streaming response
+ * 3. Call geminiAIStream() to get a simulated streaming response
  * 4. Pipe the stream back to the client
  */
 export async function POST(request: Request): Promise<Response> {
     try {
         // Step 1: Parse and validate
         const body: unknown = await request.json();
-        const { messages, newSession } = validateRequest(body);
+        const { messages } = validateRequest(body);
 
         // Step 2: Build the prompt
         const prompt = buildChatPrompt(messages);
 
-        // Step 3: Get streaming response from Raiden API
-        const stream = await raidenAIStream(prompt, newSession);
+        // Step 3: Get streaming response from Gemini AI
+        const stream = await geminiAIStream(prompt);
 
         // Step 4: Return the stream
         return new Response(stream, {
