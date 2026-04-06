@@ -66,14 +66,14 @@ export default function ChatIndexPage() {
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
             placeholder="Build me a modern dashboard..."
-            className="flex-1 border-0 bg-transparent focus-visible:ring-0 shadow-none px-5 py-6 text-foreground resize-none text-sm"
+            className="flex-1 border-0 bg-transparent focus-visible:ring-0 shadow-none px-5 py-4 h-auto text-foreground resize-none text-sm"
             autoFocus
           />
           <Button
             type="submit"
             size="icon"
             disabled={!inputVal.trim() || loading}
-            className="mr-2 h-10 w-10 rounded-xl text-primary-foreground bg-primary transition-all duration-200 shadow-md flex-shrink-0"
+            className="mx-2 h-10 w-10 rounded-xl text-primary-foreground bg-primary transition-all duration-200 shadow-md flex-shrink-0 cursor-pointer"
           >
             {loading ? <span className="animate-pulse flex items-center justify-center"><Sparkles size={16}/></span> : <Send size={18} />}
           </Button>
