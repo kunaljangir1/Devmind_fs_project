@@ -184,7 +184,7 @@ export default function AgentChatPage() {
             }}
           />
           <div className="p-1.5">
-            <Button type="submit" size="icon" disabled={!inputVal.trim() || agentRunning} className="w-8 h-8 rounded-lg bg-primary text-primary-foreground">
+            <Button type="submit" size="icon" disabled={!inputVal.trim() || agentRunning} className="w-8 h-8 rounded-lg bg-primary text-primary-foreground cursor-pointer">
               {agentRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3 h-3" />}
             </Button>
           </div>

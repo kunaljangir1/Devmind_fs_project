@@ -135,7 +135,7 @@ export default function ChatSessionPage() {
         )}
         <form
           onSubmit={sendMessage}
-          className={`relative flex items-end shadow-sm overflow-hidden focus-within:ring-1 focus-within:ring-primary/50 transition-all duration-500 ${
+          className={`relative flex items-center shadow-sm overflow-hidden focus-within:ring-1 focus-within:ring-primary/50 transition-all duration-500 ${
             isEmpty ? "max-w-2xl mx-auto bg-card border border-border rounded-xl shadow-2xl" : "max-w-3xl mx-auto bg-card border border-border rounded-xl"
           }`}
         >
@@ -143,10 +143,10 @@ export default function ChatSessionPage() {
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
             placeholder="Send a message..."
-            className="flex-1 border-0 bg-transparent focus-visible:ring-0 shadow-none text-foreground px-5 py-6 text-sm"
+            className="flex-1 border-0 bg-transparent focus-visible:ring-0 shadow-none text-foreground px-5 py-4 h-auto text-sm"
             autoFocus
           />
-          <Button type="submit" size="icon" disabled={!inputVal.trim() || loading || isSending} className="mr-2 h-10 w-10 rounded-xl bg-primary text-primary-foreground">
+          <Button type="submit" size="icon" disabled={!inputVal.trim() || loading || isSending} className="mx-2 h-10 w-10 rounded-xl bg-primary text-primary-foreground cursor-pointer">
             <Send className="w-4 h-4" />
           </Button>
         </form>
