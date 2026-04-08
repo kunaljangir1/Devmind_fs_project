@@ -9,7 +9,6 @@ import { toast } from "sonner";
 import { useAgent } from "../../agent-context";
 import { runAgentTurn, type AgentAction } from "@/lib/agent-engine";
 
-const GEMINI_API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY ?? "";
 
 export default function AgentChatPage() {
   const { id } = useParams();
@@ -55,10 +54,10 @@ export default function AgentChatPage() {
     setMessages((prev) => [...prev, { id: placeholderId, role: "ai", content: "⏳ Thinking..." }]);
 
     try {
-      if (!GEMINI_API_KEY) throw new Error("NEXT_PUBLIC_GEMINI_API_KEY not set in .env.local");
+      // No API key needed — the agent turn is proxied via /api/agent-turn server-side
 
       const agentResponse = await runAgentTurn(
-        userMessage, vfs, projectName, conversationHistory, GEMINI_API_KEY,
+        userMessage, vfs, projectName, conversationHistory, "",
         (action: AgentAction) => {
           if (action.type === "create_file" && action.path) addLogEntry({ type: "create_file", text: `+ ${action.path}`, path: action.path });
           else if (action.type === "edit_file" && action.path) addLogEntry({ type: "edit_file", text: `~ ${action.path}`, path: action.path });

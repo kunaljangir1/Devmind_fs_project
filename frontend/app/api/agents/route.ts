@@ -18,12 +18,12 @@
  * }
  */
 
-// ── Old Raiden imports (commented out) ──
-// import { raidenAI, buildAgentPrompt } from "@/lib/raiden";
+// ── New Raiden imports ──
+import { raidenAI, buildAgentPrompt } from "@/lib/raiden";
 // import { withTimeout, TimeoutError } from "@/lib/retry";
 
-// ── New Gemini imports ──
-import { geminiAI, buildAgentPrompt } from "@/lib/gemini";
+// ── Old Gemini imports (commented out) ──
+// import { geminiAI, buildAgentPrompt } from "@/lib/gemini";
 import { MAX_CODE_LENGTH, AGENT_TIMEOUT_MS } from "@/lib/config";
 
 // ─────────────────────────────────────────────
@@ -148,11 +148,11 @@ function validateRequest(body: unknown): string {
 }
 
 // ─────────────────────────────────────────────
-// Single Agent Runner (Now using Gemini)
+// Single Agent Runner (Now using Raiden)
 // ─────────────────────────────────────────────
 
 /**
- * Runs a single agent by building its prompt and calling the Gemini API.
+ * Runs a single agent by building its prompt and calling the Raiden API.
  * Each agent call has a timeout via AbortController for safety.
  */
 async function runSingleAgent(
@@ -165,9 +165,9 @@ async function runSingleAgent(
         // Build a structured prompt for this agent
         const prompt = buildAgentPrompt(agent.role, code, agent.instructions);
 
-        // Call Gemini API with a timeout wrapper
+        // Call Raiden API with a timeout wrapper
         const result = await Promise.race([
-            geminiAI(prompt),
+            raidenAI(prompt, false, AGENT_TIMEOUT_MS, "agent"),
             new Promise<never>((_, reject) =>
                 setTimeout(
                     () => reject(new Error(`Agent "${agent.name}" timed out after ${AGENT_TIMEOUT_MS / 1000}s`)),
