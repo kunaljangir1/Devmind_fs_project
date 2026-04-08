@@ -52,7 +52,7 @@ router.get('/:id/messages', (req, res) => {
 
 // Post a new message and get an AI response
 router.post('/:id/messages', async (req, res) => {
-  const { content } = req.body;
+  const { content, skipAI, aiContent } = req.body;
   if (!content) return res.status(400).json({ error: 'Content is required' });
 
   try {
@@ -68,28 +68,18 @@ router.post('/:id/messages', async (req, res) => {
     const stmt = db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)');
     stmt.run(req.params.id, 'user', content);
 
-    // ── Old Raiden API integration (commented out) ──
-    // let aiResponse = "Error communicating with AI.";
-    // try {
-    //   const apiUrlString = process.env.RAIDEN_API_URL;
-    //   if (!apiUrlString) {
-    //      console.error("Missing RAIDEN_API_URL in .env");
-    //      throw new Error("Missing API config");
-    //   }
-    //   const apiUrl = new URL(apiUrlString);
-    //   apiUrl.searchParams.append('text', content);
-    //   const response = await fetch(apiUrl.toString());
-    //   if (response.ok) {
-    //     const data = await response.json();
-    //     if (data && data.success) {
-    //       aiResponse = data.generated_text;
-    //     }
-    //   }
-    // } catch (apiError) {
-    //   console.error('Raiden API Error:', apiError);
-    // }
+    // If skipAI is true (agent page sends its own AI response), just persist
+    if (skipAI) {
+      const responseMessages = [{ role: 'user', content }];
+      if (aiContent) {
+        const stmtAi = db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)');
+        const aiInfo = stmtAi.run(req.params.id, 'ai', aiContent);
+        responseMessages.push({ id: aiInfo.lastInsertRowid, role: 'ai', content: aiContent });
+      }
+      return res.status(201).json(responseMessages);
+    }
 
-    // ── New Gemini AI integration ──
+    // ── Gemini AI integration (for regular chat, not agent) ──
     let aiResponse = "Error communicating with AI.";
     try {
       const { GoogleGenAI } = require("@google/genai");

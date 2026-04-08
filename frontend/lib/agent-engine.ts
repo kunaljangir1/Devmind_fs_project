@@ -51,16 +51,39 @@ export interface ConversationTurn {
 // VFS Helpers
 // ─────────────────────────────────────────
 
-/** Serialize VFS to a readable string for injection into prompts */
-export function serializeVFS(vfs: VirtualFileSystem): string {
+/** Serialize VFS to a readable string for injection into prompts.
+ * Budget-aware: aggressively truncates file content to fit within URL limits.
+ * @param maxTotalLength - Maximum total character budget for VFS string (default: 3000)
+ */
+export function serializeVFS(vfs: VirtualFileSystem, maxTotalLength: number = 3000): string {
   const files = Object.entries(vfs);
   if (files.length === 0) return "(empty — no files yet)";
-  return files
-    .map(([path, content]) => {
-      const preview = content.length > 2000 ? content.slice(0, 2000) + "\n...[truncated]" : content;
-      return `### ${path}\n\`\`\`\n${preview}\n\`\`\``;
-    })
-    .join("\n\n");
+
+  // Calculate per-file budget
+  const headerOverhead = 20; // ### path\n```\n...\n```
+  const maxPerFile = Math.min(
+    400,
+    Math.floor((maxTotalLength - files.length * headerOverhead) / Math.max(files.length, 1))
+  );
+
+  const parts: string[] = [];
+  let totalLen = 0;
+
+  for (const [path, content] of files) {
+    if (totalLen >= maxTotalLength) {
+      parts.push(`(${files.length - parts.length} more files omitted)`);
+      break;
+    }
+
+    const preview = content.length > maxPerFile
+      ? content.slice(0, maxPerFile) + "\n...[truncated]"
+      : content;
+    const entry = `### ${path}\n\`\`\`\n${preview}\n\`\`\``;
+    parts.push(entry);
+    totalLen += entry.length;
+  }
+
+  return parts.join("\n\n");
 }
 
 /** Apply actions to produce a new VFS (immutable update) */
@@ -175,51 +198,31 @@ export function buildSystemPrompt(
   projectName: string,
   history: ConversationTurn[]
 ): string {
-  const vfsStr = serializeVFS(vfs);
+  // Use compact VFS serialization — budget ~2500 chars for file content
+  const vfsStr = serializeVFS(vfs, 2500);
+
+  // Only keep last 4 turns to save space
   const historyStr =
     history.length > 0
       ? history
-          .slice(-8) // last 8 turns for context window
-          .map((t) => `${t.role === "user" ? "User" : "Agent"}: ${t.content}`)
+          .slice(-4)
+          .map((t) => `${t.role === "user" ? "U" : "A"}: ${t.content.slice(0, 150)}`)
           .join("\n")
-      : "(none)";
+      : "";
 
-  return `You are DevMind, an expert AI coding agent. You can create, edit, and delete files in a Virtual File System to build software projects for the user.
+  // Compact system prompt — every character counts for URL-based API
+  return `You are DevMind, an AI coding agent. Create/edit/delete files in a Virtual File System.
 
-## Your Capabilities
-- Create new files with complete, working code
-- Edit existing files to add features, fix bugs, or refactor
-- Delete files that are no longer needed
-- Provide explanations and guidance
+Project: "${projectName}" (${Object.keys(vfs).length} files)
 
-## Current Project: "${projectName}"
-
-## Current Virtual File System
+## Files
 ${vfsStr}
+${historyStr ? `\n## History\n${historyStr}` : ""}
 
-## Recent Conversation
-${historyStr}
+## RESPOND WITH ONLY VALID JSON:
+{"thinking":"reasoning","actions":[{"type":"create_file","path":"path/file.tsx","content":"full content"},{"type":"edit_file","path":"path","content":"full new content"},{"type":"delete_file","path":"path"}],"message":"explanation","needs_iteration":false}
 
-## CRITICAL RESPONSE FORMAT
-You MUST respond with ONLY valid JSON — no markdown, no explanation outside JSON.
-Structure:
-{
-  "thinking": "your reasoning about what needs to be done",
-  "actions": [
-    { "type": "create_file", "path": "relative/path/file.tsx", "content": "complete file content here" },
-    { "type": "edit_file", "path": "existing/file.ts", "content": "complete new file content" },
-    { "type": "delete_file", "path": "path/to/remove.ts" }
-  ],
-  "message": "Human-readable explanation of what you did and why",
-  "needs_iteration": false
-}
-
-## Rules
-- Always write COMPLETE file content, never partial snippets
-- Use relative paths (e.g. "app/page.tsx", "components/Button.tsx")
-- If nothing needs to change, return an empty actions array
-- Set needs_iteration to true ONLY if you need to do more passes to fulfill the request
-- The "message" field is what the user will see in chat — make it clear and helpful`;
+Rules: Write COMPLETE file content. Use relative paths. Empty actions array if no changes needed.`;
 }
 
 // ─────────────────────────────────────────

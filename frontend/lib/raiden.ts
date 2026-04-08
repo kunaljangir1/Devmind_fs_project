@@ -1,8 +1,12 @@
 /**
  * lib/raiden.ts — Typed API client for the Raiden AI API.
  *
- * This module enables direct HTTP calls to the custom Raiden API endpoint, 
+ * This module enables direct HTTP calls to the custom Raiden API endpoint,
  * including fail-safe mechanisms for automated model selection and fallback logic.
+ *
+ * KEY CONSTRAINT: The Raiden API only supports GET requests with query parameters.
+ * For large prompts (agent scenarios w/ VFS), we compress the prompt aggressively
+ * and split into multiple exchanges if needed.
  */
 
 import {
@@ -57,43 +61,97 @@ export async function getAvailableModels(): Promise<string[]> {
     } catch (error) {
         console.error("Failed to fetch Raiden models:", error);
     }
-    
-    // Fallback if the endpoint is down
-    return ["gpt-4o-latest", "claude-sonnet-4", "gemini-2.5-pro"]; 
+
+    // Fallback if the endpoint is down — updated to match current available models
+    return ["gpt-5.2", "gpt-5", "gpt-4o-latest", "claude-sonnet-4", "gemini-2.5-pro", "deepseek-r1", "deepseek-v3.1"];
 }
 
 /**
  * Determines the preferred list of models for the given interaction type.
+ * Updated to prioritize the best-performing models currently available.
  */
 function getPreferredModelList(type: AIRequestType, available: string[]): string[] {
     let idealOrder: string[] = [];
     if (type === "chat") {
         idealOrder = [
             "gpt-4o-latest",
+            "gpt-5",
+            "gpt-5.2",
             "claude-sonnet-4",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "deepseek-v3.1",
+            "deepseek-v3",
+            "o3-mini",
+        ];
+    } else {
+        // Agent type — needs models good at structured JSON output
+        idealOrder = [
+            "gpt-4o-latest",
+            "gpt-5",
+            "gpt-5.2",
+            "claude-sonnet-4",
+            "deepseek-r1",
             "gemini-2.5-pro",
             "o3-mini",
             "deepseek-v3.1",
-            "deepseek-v3"
-        ];
-    } else {
-        idealOrder = [
-            "claude-sonnet-4",
-            "deepseek-r1",
-            "gpt-5",
-            "gpt-4o-latest",
-            "o3-mini",
-            "deepseek-v3.1"
         ];
     }
 
     // Filter available models that match our ideal order
     const preferredAvailable = idealOrder.filter(m => available.includes(m));
-    
-    // Fallback: in case all ideal order models fail, we could append the rest of available models.
+
+    // Fallback: in case all ideal order models fail, append the rest of available models.
     const remaining = available.filter(m => !preferredAvailable.includes(m));
 
     return [...preferredAvailable, ...remaining];
+}
+
+// ─────────────────────────────────────────────
+// Prompt Compression for URL-based API
+// ─────────────────────────────────────────────
+
+/**
+ * Compresses a prompt to fit within the maximum URL length constraint.
+ * Uses progressive strategies:
+ * 1. Remove excessive whitespace/blank lines
+ * 2. Truncate code blocks to summaries
+ * 3. Hard-truncate from the middle if still too long
+ */
+function compressPromptForURL(text: string, maxLength: number): string {
+    // Step 1: Normalize whitespace — collapse multiple blank lines, trim line endings
+    let compressed = text
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[ \t]+$/gm, "")
+        .replace(/^[ \t]+/gm, (match) => match.length > 4 ? "    " : match);
+
+    if (compressed.length <= maxLength) return compressed;
+
+    // Step 2: Truncate long code blocks (keep first and last 15 lines of each)
+    compressed = compressed.replace(/```[\s\S]*?```/g, (block) => {
+        if (block.length <= 600) return block;
+        const lines = block.split("\n");
+        const header = lines[0]; // ```lang
+        if (lines.length <= 30) return block;
+        const kept = [
+            header,
+            ...lines.slice(1, 16),
+            "// ... [truncated] ...",
+            ...lines.slice(-15, -1),
+            "```"
+        ];
+        return kept.join("\n");
+    });
+
+    if (compressed.length <= maxLength) return compressed;
+
+    // Step 3: Hard truncate — keep beginning (system prompt & instructions) and end (user request)
+    const halfLen = Math.floor(maxLength / 2) - 30;
+    compressed = compressed.slice(0, halfLen) +
+        "\n\n[...CONTEXT TRUNCATED FOR LENGTH...]\n\n" +
+        compressed.slice(-halfLen);
+
+    return compressed;
 }
 
 // ─────────────────────────────────────────────
@@ -102,6 +160,8 @@ function getPreferredModelList(type: AIRequestType, available: string[]): string
 
 /**
  * Makes a single request to the Raiden AI API, with fail-safe fallback.
+ * Uses GET with query parameters (API only supports GET).
+ * Automatically compresses prompts that would exceed URL length limits.
  */
 export async function raidenAI(
     text: string,
@@ -117,24 +177,36 @@ export async function raidenAI(
     for (const model of tryModels) {
         try {
             console.log(`[raiden] Attempting model: ${model} for type: ${type}`);
-            
+
             // Core generation logic
             const responseText = await withRetry(async () => {
                 return withTimeout(
                     async (signal: AbortSignal) => {
                         const url = new URL(RAIDEN_BASE_URL);
-                        url.searchParams.set("text", text);
                         url.searchParams.set("model", model);
                         url.searchParams.set("new_session", String(newSession));
 
+                        // Calculate available space for text after other params
+                        const baseUrlLen = url.toString().length + "&text=".length;
+                        const maxTextLen = MAX_URL_LENGTH - baseUrlLen - 200; // 200 char safety margin for encoding
+
+                        // Compress prompt if needed
+                        const promptText = text.length > maxTextLen
+                            ? compressPromptForURL(text, maxTextLen)
+                            : text;
+
+                        url.searchParams.set("text", promptText);
+
                         const urlString = url.toString();
                         if (urlString.length > MAX_URL_LENGTH) {
-                            const overhead = urlString.length - text.length;
-                            const maxTextLength = MAX_URL_LENGTH - overhead - 40;
-                            const halfLen = Math.floor(maxTextLength / 2);
-                            const truncatedText = text.slice(0, halfLen) + "\n...[TRUNCATED]...\n" + text.slice(-halfLen);
-                            url.searchParams.set("text", truncatedText);
+                            // Final safety: if URL is STILL too long after compression, hard-truncate
+                            const overhead = urlString.length - promptText.length;
+                            const safeLen = MAX_URL_LENGTH - overhead - 100;
+                            const truncated = promptText.slice(0, safeLen);
+                            url.searchParams.set("text", truncated);
                         }
+
+                        console.log(`[raiden] URL length: ${url.toString().length} chars (prompt: ${url.searchParams.get("text")?.length} chars)`);
 
                         const response = await fetch(url.toString(), {
                             method: "GET",
@@ -153,6 +225,11 @@ export async function raidenAI(
                         }
 
                         const responseJSON = await response.json();
+
+                        if (!responseJSON.success) {
+                            throw new Error(`Raiden returned success=false: ${responseJSON.message || "Unknown"}`);
+                        }
+
                         return responseJSON.generated_text;
                     },
                     timeoutMs,
@@ -165,7 +242,7 @@ export async function raidenAI(
             } else {
                 throw new Error("Received empty response string");
             }
-            
+
         } catch (error: any) {
             console.warn(`[raiden] Model ${model} failed: ${error.message}. Switching to next...`);
             lastError = error instanceof Error ? error : new Error(String(error));

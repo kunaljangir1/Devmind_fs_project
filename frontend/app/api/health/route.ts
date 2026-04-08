@@ -1,39 +1,39 @@
 /**
  * app/api/health/route.ts — API Health Check Endpoint
  *
- * Makes a test call to the Gemini AI API and reports connectivity status.
+ * Makes a test call to the Raiden AI API and reports connectivity status.
  * Useful for debugging deployment issues and monitoring API availability.
  *
  * Response:
- *   200 → { status: "ok", model: "gemini-2.5-flash-lite", latencyMs: number }
+ *   200 → { status: "ok", api: "raiden", models: string[], latencyMs: number }
  *   503 → { status: "error", message: string }
  */
 
-// ── Old Raiden import (commented out) ──
-// import { RAIDEN_BASE_URL, RAIDEN_MODEL } from "@/lib/config";
-
-// ── New Gemini import ──
-import { geminiAI } from "@/lib/gemini";
+import { raidenAI, getAvailableModels } from "@/lib/raiden";
 
 /**
- * GET /api/health — Check Gemini API connectivity.
+ * GET /api/health — Check Raiden API connectivity.
  *
- * Sends a simple "ping" request to the Gemini API and measures
- * the round-trip time. Returns status, model name, and latency.
+ * Sends a simple "ping" request to the Raiden API and measures
+ * the round-trip time. Returns status, available models, and latency.
  */
 export async function GET(): Promise<Response> {
     const startTime = Date.now();
 
     try {
-        // Make a quick test call to Gemini
-        await geminiAI("ping");
+        // Check model availability
+        const models = await getAvailableModels();
+
+        // Make a quick test call to Raiden
+        await raidenAI("ping", false, 10_000, "chat");
 
         const latencyMs = Date.now() - startTime;
 
         return new Response(
             JSON.stringify({
                 status: "ok",
-                model: "gemini-2.5-flash-lite",
+                api: "raiden",
+                modelsAvailable: models.length,
                 latencyMs,
             }),
             { status: 200, headers: { "Content-Type": "application/json" } }

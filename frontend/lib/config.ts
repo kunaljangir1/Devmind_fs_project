@@ -23,14 +23,14 @@ export const MAX_CODE_LENGTH = 4000;
 /** Default request timeout in milliseconds */
 export const REQUEST_TIMEOUT_MS = 30_000;
 
-/** Per-agent timeout for parallel analysis (slightly shorter than total) */
-export const AGENT_TIMEOUT_MS = 25_000;
+/** Per-agent timeout for parallel analysis */
+export const AGENT_TIMEOUT_MS = 45_000;
 
 /** Maximum retry attempts for transient failures */
 export const MAX_RETRIES = 2;
 
-/** Maximum URL length before truncation (browser/server safe limit) */
-export const MAX_URL_LENGTH = 7500;
+/** Maximum URL length before truncation (Raiden API tested up to ~8KB) */
+export const MAX_URL_LENGTH = 8000;
 
 /** Maximum chat messages to include in context */
 export const MAX_CHAT_MESSAGES = 10;

@@ -73,16 +73,27 @@ export default function AgentChatPage() {
       addConversationTurn({ role: "agent", content: agentResponse.message });
       addLogEntry({ type: "system", text: `✓ ${agentResponse.actions.length} action(s) applied` });
 
-      // Persist to backend (for conversation history display)
+      // Persist to backend with skipAI=true (agent already generated the response via Raiden)
       try {
         await fetchWithAuth(`/chats/${chatId}/messages`, {
           method: "POST",
-          body: JSON.stringify({ content: userMessage }),
+          body: JSON.stringify({
+            content: userMessage,
+            skipAI: true,
+            aiContent: agentResponse.message,
+          }),
         });
       } catch {}
     } catch (err: any) {
       const errMsg = err.message || "Agent error";
-      setMessages((prev) => prev.map((m) => m.id === placeholderId ? { ...m, content: `❌ ${errMsg}` } : m));
+      const isTimeout = errMsg.includes("timed out");
+      const isNetwork = errMsg.includes("fetch") || errMsg.includes("network");
+      const hint = isTimeout
+        ? " (Try a simpler request)"
+        : isNetwork
+        ? " (Check your connection)"
+        : " (Try again)";
+      setMessages((prev) => prev.map((m) => m.id === placeholderId ? { ...m, content: `❌ ${errMsg}${hint}` } : m));
       addLogEntry({ type: "system", text: `✗ ${errMsg}` });
     } finally {
       setAgentRunning(false);
