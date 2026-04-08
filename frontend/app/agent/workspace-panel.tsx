@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import {
   FolderTree, ChevronRight, ChevronDown, FileCode2, FileJson,
-  Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder,
+  Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder, ChevronUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -75,6 +75,14 @@ export function AgentWorkspacePanel() {
   const [activeTab, setActiveTab] = useState("code");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [editedContent, setEditedContent] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState(true);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (logOpen && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [agentLog, logOpen]);
 
   const fileTree = useMemo(() => buildFileTree(vfs), [vfs]);
   const fileCount = Object.keys(vfs).length;
@@ -211,20 +219,28 @@ export function AgentWorkspacePanel() {
               </div>
             </Tabs>
 
-            {/* Terminal */}
-            <div className="h-40 shrink-0 border-t border-border/40 bg-[#0d1117] flex flex-col">
-              <div className="px-3 py-1 border-b border-[#30363d] bg-[#010409] shrink-0">
+            {/* Terminal / Agent Log — collapsible bottom bar */}
+            <div className={`shrink-0 border-t border-border/40 bg-[#0d1117] flex flex-col transition-all duration-300 ${logOpen ? "h-44" : "h-8"}`}>
+              <div
+                className="px-3 border-b border-[#30363d] bg-[#010409] shrink-0 flex items-center justify-between cursor-pointer select-none h-8"
+                onClick={() => setLogOpen((v) => !v)}
+              >
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-[#8b949e] flex items-center gap-1.5">
                   <Terminal className="w-3 h-3" /> Agent Log
+                  <span className="text-[#484f58] normal-case tracking-normal font-normal">{agentLog.length} entries</span>
                 </span>
+                <ChevronUp className={`w-3.5 h-3.5 text-[#484f58] transition-transform duration-300 ${logOpen ? "" : "rotate-180"}`} />
               </div>
-              <ScrollArea className="flex-1">
-                <div className="p-2.5 font-mono text-[11px] space-y-1">
-                  {agentLog.length === 0 ? (
-                    <span className="text-[#484f58] italic">Waiting for agent activity...</span>
-                  ) : agentLog.map((e, i) => <TerminalLine key={i} entry={e} />)}
+              {logOpen && (
+                <div className="flex-1 overflow-y-auto overflow-x-hidden">
+                  <div className="p-2.5 font-mono text-[11px] space-y-1 break-words whitespace-pre-wrap">
+                    {agentLog.length === 0 ? (
+                      <span className="text-[#484f58] italic">Waiting for agent activity...</span>
+                    ) : agentLog.map((e, i) => <TerminalLine key={i} entry={e} />)}
+                    <div ref={logEndRef} />
+                  </div>
                 </div>
-              </ScrollArea>
+              )}
             </div>
           </div>
         </div>
