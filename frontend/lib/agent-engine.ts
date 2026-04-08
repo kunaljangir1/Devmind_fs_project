@@ -1,18 +1,17 @@
 /**
  * lib/agent-engine.ts — DevMind Coding Agent Engine
  *
- * Manages the Virtual File System (VFS), builds structured prompts for Gemini,
+ * Manages the Virtual File System (VFS), builds structured prompts,
  * and parses the agent's JSON-formatted action responses.
+ *
+ * Designed for URL-constrained APIs (Raiden GET): prompts are compact
+ * but explicit enough for models to produce complete, working code.
  */
 
 // ─────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────
 
-// raidenAI is intentionally NOT imported here — it runs server-side only.
-// Client-side calls go via POST /api/agent-turn to avoid CORS restrictions.
-
-/** Flat map of file paths to their string content */
 export type VirtualFileSystem = Record<string, string>;
 
 export type AgentActionType =
@@ -51,19 +50,34 @@ export interface ConversationTurn {
 // VFS Helpers
 // ─────────────────────────────────────────
 
-/** Serialize VFS to a readable string for injection into prompts.
- * Budget-aware: aggressively truncates file content to fit within URL limits.
- * @param maxTotalLength - Maximum total character budget for VFS string (default: 3000)
+/**
+ * Serialize VFS to a compact file listing for the prompt.
+ * Only includes file NAMES and sizes to save URL space.
+ * The model knows the project structure without seeing all code.
  */
-export function serializeVFS(vfs: VirtualFileSystem, maxTotalLength: number = 3000): string {
+export function serializeVFSCompact(vfs: VirtualFileSystem): string {
   const files = Object.entries(vfs);
-  if (files.length === 0) return "(empty — no files yet)";
+  if (files.length === 0) return "(empty project)";
 
-  // Calculate per-file budget
-  const headerOverhead = 20; // ### path\n```\n...\n```
+  return files
+    .map(([path, content]) => {
+      const lines = content.split("\n").length;
+      return `- ${path} (${lines} lines)`;
+    })
+    .join("\n");
+}
+
+/**
+ * Serialize VFS with limited code previews.
+ * Used when the model needs to see existing code to edit it.
+ */
+export function serializeVFS(vfs: VirtualFileSystem, maxTotalLength: number = 2000): string {
+  const files = Object.entries(vfs);
+  if (files.length === 0) return "(empty project)";
+
   const maxPerFile = Math.min(
-    400,
-    Math.floor((maxTotalLength - files.length * headerOverhead) / Math.max(files.length, 1))
+    300,
+    Math.floor(maxTotalLength / Math.max(files.length, 1))
   );
 
   const parts: string[] = [];
@@ -71,14 +85,14 @@ export function serializeVFS(vfs: VirtualFileSystem, maxTotalLength: number = 30
 
   for (const [path, content] of files) {
     if (totalLen >= maxTotalLength) {
-      parts.push(`(${files.length - parts.length} more files omitted)`);
+      parts.push(`... and ${files.length - parts.length} more files`);
       break;
     }
 
     const preview = content.length > maxPerFile
       ? content.slice(0, maxPerFile) + "\n...[truncated]"
       : content;
-    const entry = `### ${path}\n\`\`\`\n${preview}\n\`\`\``;
+    const entry = `=== ${path} ===\n${preview}`;
     parts.push(entry);
     totalLen += entry.length;
   }
@@ -193,74 +207,158 @@ export function getStarterVFS(projectName: string, projectType: string): Virtual
 // System Prompt Builder
 // ─────────────────────────────────────────
 
+/**
+ * Builds the system prompt for the agent.
+ *
+ * Strategy: Keep the INSTRUCTIONS short and crystal-clear.
+ * Only include file NAMES (not content) to save URL space.
+ * The model should generate complete new files, not edit existing ones character-by-character.
+ */
 export function buildSystemPrompt(
   vfs: VirtualFileSystem,
   projectName: string,
   history: ConversationTurn[]
 ): string {
-  // Use compact VFS serialization — budget ~2500 chars for file content
-  const vfsStr = serializeVFS(vfs, 2500);
+  // File listing (names only — saves massive URL space)
+  const fileList = serializeVFSCompact(vfs);
 
-  // Only keep last 4 turns to save space
+  // Minimal history — just last 2 turns, truncated
   const historyStr =
     history.length > 0
       ? history
-          .slice(-4)
-          .map((t) => `${t.role === "user" ? "U" : "A"}: ${t.content.slice(0, 150)}`)
+          .slice(-2)
+          .map((t) => `${t.role === "user" ? "User" : "Agent"}: ${t.content.slice(0, 100)}`)
           .join("\n")
       : "";
 
-  // Compact system prompt — every character counts for URL-based API
-  return `You are DevMind, an AI coding agent. Create/edit/delete files in a Virtual File System.
+  return `You are DevMind, a senior full-stack developer AI agent. You build complete, production-ready applications.
 
-Project: "${projectName}" (${Object.keys(vfs).length} files)
+PROJECT: "${projectName}"
+FILES:
+${fileList}
+${historyStr ? `\nRECENT:\n${historyStr}` : ""}
 
-## Files
-${vfsStr}
-${historyStr ? `\n## History\n${historyStr}` : ""}
+RESPOND WITH VALID JSON ONLY. No markdown wrapping. No explanation outside JSON.
 
-## RESPOND WITH ONLY VALID JSON:
-{"thinking":"reasoning","actions":[{"type":"create_file","path":"path/file.tsx","content":"full content"},{"type":"edit_file","path":"path","content":"full new content"},{"type":"delete_file","path":"path"}],"message":"explanation","needs_iteration":false}
+FORMAT:
+{"thinking":"brief plan","actions":[{"type":"create_file","path":"app/page.tsx","content":"FULL FILE CONTENT HERE"},{"type":"edit_file","path":"app/page.tsx","content":"FULL REPLACEMENT CONTENT"},{"type":"delete_file","path":"old/file.ts"}],"message":"What you did"}
 
-Rules: Write COMPLETE file content. Use relative paths. Empty actions array if no changes needed.`;
+CRITICAL RULES:
+1. ALWAYS write COMPLETE, WORKING code in "content" - NEVER use placeholders like "// ..." or "/* TODO */"
+2. Every file must be production-ready with imports, exports, proper styling, and error handling
+3. Use Tailwind CSS for styling, modern React patterns, TypeScript
+4. When creating a feature, create ALL needed files (components, styles, types, utils)
+5. "content" must contain the ENTIRE file - not a snippet, not a diff, the WHOLE file
+6. Use relative paths like "app/page.tsx" or "components/Button.tsx"
+7. If no changes needed, return {"thinking":"","actions":[],"message":"No changes needed"}`;
 }
 
 // ─────────────────────────────────────────
 // Response Parser
 // ─────────────────────────────────────────
 
+/**
+ * Parses the raw AI response text into a structured AgentResponse.
+ *
+ * Handles multiple formats:
+ * 1. Clean JSON: {"thinking": ..., "actions": [...], "message": ...}
+ * 2. Markdown-wrapped: ```json\n{...}\n```
+ * 3. Prefixed text: "Here's the result: {...}"
+ * 4. Broken JSON: attempts partial recovery
+ */
 export function parseAgentResponse(rawText: string): AgentResponse {
-  // Strip markdown fences if present
   let cleaned = rawText.trim();
+
+  // Strategy 1: Extract from markdown code fences
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
     cleaned = fenceMatch[1].trim();
   }
 
-  // Find the JSON object boundaries
-  const startIdx = cleaned.indexOf("{");
-  const endIdx = cleaned.lastIndexOf("}");
-  if (startIdx !== -1 && endIdx !== -1) {
-    cleaned = cleaned.slice(startIdx, endIdx + 1);
+  // Strategy 2: Find the outermost JSON object
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
 
+  // Strategy 3: Try parsing directly
   try {
-    const parsed = JSON.parse(cleaned) as AgentResponse;
-    return {
-      thinking: parsed.thinking ?? "",
-      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-      message: parsed.message ?? "Done.",
-      needs_iteration: parsed.needs_iteration ?? false,
-    };
+    const parsed = JSON.parse(cleaned);
+    return normalizeResponse(parsed);
   } catch {
-    // Fallback: treat entire response as a message with no actions
-    return {
-      thinking: "",
-      actions: [],
-      message: rawText.length > 500 ? rawText.slice(0, 500) + "..." : rawText,
-      needs_iteration: false,
-    };
+    // Strategy 4: Try to fix common JSON issues
   }
+
+  // Strategy 4: Fix unescaped newlines in string values (common AI mistake)
+  try {
+    // Replace literal newlines inside string values with \n
+    const fixed = cleaned
+      .replace(/:\s*"([^"]*?)"/g, (match, val) => {
+        return `: "${val.replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+      });
+    const parsed = JSON.parse(fixed);
+    return normalizeResponse(parsed);
+  } catch {
+    // Strategy 5: Try to extract just the actions array
+  }
+
+  // Strategy 5: Look for actions array pattern
+  try {
+    const actionsMatch = cleaned.match(/"actions"\s*:\s*(\[[\s\S]*?\])/);
+    const messageMatch = cleaned.match(/"message"\s*:\s*"([^"]*?)"/);
+    if (actionsMatch) {
+      const actions = JSON.parse(actionsMatch[1]);
+      return {
+        thinking: "",
+        actions: Array.isArray(actions) ? actions : [],
+        message: messageMatch ? messageMatch[1] : "Changes applied.",
+        needs_iteration: false,
+      };
+    }
+  } catch {
+    // All JSON strategies failed
+  }
+
+  // Strategy 6: If response looks like it contains useful text but no valid JSON,
+  // treat the entire response as a conversational message (no file actions)
+  const cleanedText = rawText
+    .replace(/```json\s*/g, "")
+    .replace(/```\s*/g, "")
+    .replace(/^\s*\{[\s\S]*$/, "") // Remove broken JSON
+    .trim();
+
+  return {
+    thinking: "",
+    actions: [],
+    message: cleanedText.length > 0
+      ? (cleanedText.length > 600 ? cleanedText.slice(0, 600) + "..." : cleanedText)
+      : "I couldn't process that request. Please try rephrasing.",
+    needs_iteration: false,
+  };
+}
+
+function normalizeResponse(parsed: Record<string, unknown>): AgentResponse {
+  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+
+  // Filter out actions with placeholder/stub content
+  const validActions = actions.filter((a: AgentAction) => {
+    if (a.type === "delete_file") return true;
+    if (!a.path) return false;
+    if (a.type === "create_file" || a.type === "edit_file") {
+      // Reject stubs — content must be real code, not placeholders
+      if (!a.content || a.content.trim().length < 10) return false;
+      if (a.content.trim() === "// ..." || a.content.trim() === "/* TODO */") return false;
+    }
+    return true;
+  });
+
+  return {
+    thinking: typeof parsed.thinking === "string" ? parsed.thinking : "",
+    actions: validActions as AgentAction[],
+    message: typeof parsed.message === "string" ? parsed.message : "Done.",
+    needs_iteration: !!parsed.needs_iteration,
+  };
 }
 
 // ─────────────────────────────────────────
@@ -276,7 +374,7 @@ export async function runAgentTurn(
   onAction?: (action: AgentAction) => void
 ): Promise<AgentResponse> {
   const systemPrompt = buildSystemPrompt(vfs, projectName, history);
-  const fullPrompt = `${systemPrompt}\n\n## User Request\n${userMessage}`;
+  const fullPrompt = `${systemPrompt}\n\nUSER REQUEST: ${userMessage}`;
 
   // POST to the server-side proxy route to avoid CORS issues with the Raiden API
   const response = await fetch("/api/agent-turn", {
@@ -342,7 +440,6 @@ export async function readDirectoryToVFS(
           vfs[fullPath] = `// [File too large to display: ${(file.size / 1024).toFixed(0)}KB]`;
         } else {
           const text = await file.text();
-          // Only include text files
           if (!isBinaryContent(text)) {
             vfs[fullPath] = text;
           }
@@ -357,7 +454,6 @@ export async function readDirectoryToVFS(
 }
 
 function isBinaryContent(text: string): boolean {
-  // Heuristic: if > 10% null bytes or control chars, likely binary
   let nonPrintable = 0;
   const sample = text.slice(0, 512);
   for (let i = 0; i < sample.length; i++) {
