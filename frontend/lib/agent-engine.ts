@@ -9,6 +9,9 @@
 // Types
 // ─────────────────────────────────────────
 
+// raidenAI is intentionally NOT imported here — it runs server-side only.
+// Client-side calls go via POST /api/agent-turn to avoid CORS restrictions.
+
 /** Flat map of file paths to their string content */
 export type VirtualFileSystem = Record<string, string>;
 
@@ -258,7 +261,7 @@ export function parseAgentResponse(rawText: string): AgentResponse {
 }
 
 // ─────────────────────────────────────────
-// Main Agent Call (client-side, uses fetch to Gemini REST)
+// Main Agent Call (client-side → proxies via /api/agent-turn)
 // ─────────────────────────────────────────
 
 export async function runAgentTurn(
@@ -272,30 +275,19 @@ export async function runAgentTurn(
   const systemPrompt = buildSystemPrompt(vfs, projectName, history);
   const fullPrompt = `${systemPrompt}\n\n## User Request\n${userMessage}`;
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: fullPrompt }] }],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 8192,
-        },
-      }),
-    }
-  );
+  // POST to the server-side proxy route to avoid CORS issues with the Raiden API
+  const response = await fetch("/api/agent-turn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: fullPrompt }),
+  });
 
   if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Gemini API error: ${response.status} — ${err}`);
+    const err = await response.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(err.error || `Agent API error: ${response.status}`);
   }
 
-  const data = await response.json();
-  const rawText: string =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-
+  const { rawText } = await response.json();
   const parsed = parseAgentResponse(rawText);
 
   // Fire action callbacks for progressive updates

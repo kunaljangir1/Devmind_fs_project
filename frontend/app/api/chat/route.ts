@@ -13,11 +13,11 @@
  * - Returns ReadableStream with Content-Type: text/plain
  */
 
-// ── Old Raiden import (commented out) ──
-// import { raidenAIStream } from "@/lib/raiden";
+// ── New Raiden import ──
+import { raidenAIStream } from "@/lib/raiden";
 
-// ── New Gemini import ──
-import { geminiAIStream } from "@/lib/gemini";
+// ── Old Gemini import (commented out) ──
+// import { geminiAIStream } from "@/lib/gemini";
 import { DEVMIND_SYSTEM_PROMPT, MAX_CHAT_MESSAGES } from "@/lib/config";
 
 /**
@@ -123,8 +123,8 @@ export async function POST(request: Request): Promise<Response> {
         // Step 2: Build the prompt
         const prompt = buildChatPrompt(messages);
 
-        // Step 3: Get streaming response from Gemini AI
-        const stream = await geminiAIStream(prompt);
+        // Step 3: Get streaming response from Raiden AI (with fail-safe)
+        const stream = await raidenAIStream(prompt, false, "chat");
 
         // Step 4: Return the stream
         return new Response(stream, {
