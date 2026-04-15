@@ -3,7 +3,8 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   FolderTree, ChevronRight, ChevronDown, FileCode2, FileJson,
-  Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder, ChevronUp,
+  Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder,
+  ChevronUp, Maximize2, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -70,26 +71,43 @@ function TerminalLine({ entry }: { entry: { timestamp: string; type: string; tex
   );
 }
 
+// Shared log content body
+function LogContent({ agentLog, logEndRef }: {
+  agentLog: { timestamp: string; type: string; text: string }[];
+  logEndRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div className="flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="p-2.5 font-mono text-[11px] space-y-1 break-words whitespace-pre-wrap">
+        {agentLog.length === 0 ? (
+          <span className="text-[#484f58] italic">Waiting for agent activity...</span>
+        ) : agentLog.map((e, i) => <TerminalLine key={i} entry={e} />)}
+        <div ref={logEndRef} />
+      </div>
+    </div>
+  );
+}
+
 export function AgentWorkspacePanel() {
   const { projectName, projectMode, vfs, setVfs, activeFile, setActiveFile, agentLog } = useAgent();
   const [activeTab, setActiveTab] = useState("code");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [editedContent, setEditedContent] = useState<string | null>(null);
   const [logOpen, setLogOpen] = useState(true);
+  const [logFullscreen, setLogFullscreen] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (logOpen && logEndRef.current) {
+    if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [agentLog, logOpen]);
+  }, [agentLog, logOpen, logFullscreen]);
 
   const fileTree = useMemo(() => buildFileTree(vfs), [vfs]);
   const fileCount = Object.keys(vfs).length;
   const activeContent = editedContent !== null ? editedContent : (activeFile ? vfs[activeFile] ?? "" : "");
   const hasUnsavedChanges = editedContent !== null && editedContent !== (activeFile ? vfs[activeFile] : "");
 
-  // Don't show until project is initialized
   if (projectMode === null) return null;
 
   const handleFileSelect = (path: string) => {
@@ -120,9 +138,25 @@ export function AgentWorkspacePanel() {
     URL.revokeObjectURL(url);
   };
 
+  const handleTabChange = (tab: string) => {
+    if (tab === "log") return; // handled by logFullscreen state
+    setActiveTab(tab);
+  };
+
+  const openLogFullscreen = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLogFullscreen(true);
+    setActiveTab("log");
+  };
+
+  const closeLogFullscreen = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLogFullscreen(false);
+    setActiveTab("code");
+  };
+
   return (
     <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
-      {/* Workspace area takes full remaining space minus chat pane (handled by parent) */}
       <div className="flex-1 flex flex-col overflow-hidden border-b lg:border-b-0 lg:border-r border-border/40">
         {/* Header */}
         <header className="flex shrink-0 items-center justify-between px-4 py-2 border-b border-border/40 bg-card/50">
@@ -174,17 +208,44 @@ export function AgentWorkspacePanel() {
 
           {/* Editor + Terminal */}
           <div className="flex-1 flex flex-col min-w-0">
-            <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 min-h-0">
+            <Tabs value={logFullscreen ? "log" : activeTab} onValueChange={handleTabChange} className="flex flex-col flex-1 min-h-0">
+              {/* Tab bar */}
               <div className="flex items-center px-3 bg-muted/10 border-b border-border/40 shrink-0">
                 <TabsList className="bg-transparent border-0 h-9 w-auto rounded-none p-0 gap-3">
-                  <TabsTrigger value="code" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none px-1.5 h-full text-[11px] font-medium uppercase text-muted-foreground data-[state=active]:text-foreground">
+                  <TabsTrigger
+                    value="code"
+                    onClick={() => { setLogFullscreen(false); setActiveTab("code"); }}
+                    className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none px-1.5 h-full text-[11px] font-medium uppercase text-muted-foreground data-[state=active]:text-foreground"
+                  >
                     <Code2 className="w-3.5 h-3.5 mr-1.5" /> Code
                   </TabsTrigger>
-                  <TabsTrigger value="preview" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none px-1.5 h-full text-[11px] font-medium uppercase text-muted-foreground data-[state=active]:text-foreground">
+                  <TabsTrigger
+                    value="preview"
+                    onClick={() => { setLogFullscreen(false); setActiveTab("preview"); }}
+                    className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none px-1.5 h-full text-[11px] font-medium uppercase text-muted-foreground data-[state=active]:text-foreground"
+                  >
                     <MonitorPlay className="w-3.5 h-3.5 mr-1.5" /> Preview
                   </TabsTrigger>
+
+                  {/* Log tab — only shown when fullscreen */}
+                  {logFullscreen && (
+                    <TabsTrigger
+                      value="log"
+                      className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-[#8b949e] rounded-none px-1.5 h-full text-[11px] font-medium uppercase text-[#8b949e] data-[state=active]:text-[#c9d1d9] flex items-center gap-1.5"
+                    >
+                      <Terminal className="w-3.5 h-3.5" /> Log
+                      <div
+                        role="button"
+                        onClick={closeLogFullscreen}
+                        className="ml-1 rounded-sm hover:bg-white/10 p-0.5 transition-colors cursor-pointer flex items-center justify-center pointer-events-auto"
+                        title="Close fullscreen log"
+                      >
+                        <X className="w-3 h-3" />
+                      </div>
+                    </TabsTrigger>
+                  )}
                 </TabsList>
-                {activeFile && (
+                {!logFullscreen && activeFile && (
                   <span className="ml-auto text-[10px] text-muted-foreground font-mono truncate max-w-[200px]">
                     {activeFile}{hasUnsavedChanges ? " ●" : ""}
                   </span>
@@ -216,32 +277,41 @@ export function AgentWorkspacePanel() {
                     <p className="text-xs">Export ZIP and run locally</p>
                   </div>
                 </TabsContent>
+
+                {/* Log fullscreen tab content */}
+                {logFullscreen && (
+                  <TabsContent value="log" className="absolute inset-0 m-0 border-0 flex flex-col bg-[#0d1117]">
+                    <LogContent agentLog={agentLog} logEndRef={logEndRef} />
+                  </TabsContent>
+                )}
               </div>
             </Tabs>
 
-            {/* Terminal / Agent Log — collapsible bottom bar */}
-            <div className={`shrink-0 border-t border-border/40 bg-[#0d1117] flex flex-col transition-all duration-300 ${logOpen ? "h-44" : "h-8"}`}>
-              <div
-                className="px-3 border-b border-[#30363d] bg-[#010409] shrink-0 flex items-center justify-between cursor-pointer select-none h-8"
-                onClick={() => setLogOpen((v) => !v)}
-              >
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#8b949e] flex items-center gap-1.5">
-                  <Terminal className="w-3 h-3" /> Agent Log
-                  <span className="text-[#484f58] normal-case tracking-normal font-normal">{agentLog.length} entries</span>
-                </span>
-                <ChevronUp className={`w-3.5 h-3.5 text-[#484f58] transition-transform duration-300 ${logOpen ? "" : "rotate-180"}`} />
-              </div>
-              {logOpen && (
-                <div className="flex-1 overflow-y-auto overflow-x-hidden">
-                  <div className="p-2.5 font-mono text-[11px] space-y-1 break-words whitespace-pre-wrap">
-                    {agentLog.length === 0 ? (
-                      <span className="text-[#484f58] italic">Waiting for agent activity...</span>
-                    ) : agentLog.map((e, i) => <TerminalLine key={i} entry={e} />)}
-                    <div ref={logEndRef} />
+            {/* Terminal / Agent Log — collapsible bottom bar (hidden when fullscreen) */}
+            {!logFullscreen && (
+              <div className={`shrink-0 border-t border-border/40 bg-[#0d1117] flex flex-col transition-all duration-300 ${logOpen ? "h-44" : "h-8"}`}>
+                <div
+                  className="px-3 border-b border-[#30363d] bg-[#010409] shrink-0 flex items-center justify-between cursor-pointer select-none h-8"
+                  onClick={() => setLogOpen((v) => !v)}
+                >
+                  <span className="text-[10px] uppercase tracking-wider font-semibold text-[#8b949e] flex items-center gap-1.5">
+                    <Terminal className="w-3 h-3" /> Agent Log
+                    <span className="text-[#484f58] normal-case tracking-normal font-normal">{agentLog.length} entries</span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={openLogFullscreen}
+                      className="p-0.5 rounded hover:bg-white/10 transition-colors"
+                      title="Open log in fullscreen tab"
+                    >
+                      <Maximize2 className="w-3 h-3 text-[#484f58] hover:text-[#8b949e]" />
+                    </button>
+                    <ChevronUp className={`w-3.5 h-3.5 text-[#484f58] transition-transform duration-300 ${logOpen ? "" : "rotate-180"}`} />
                   </div>
                 </div>
-              )}
-            </div>
+                {logOpen && <LogContent agentLog={agentLog} logEndRef={logEndRef} />}
+              </div>
+            )}
           </div>
         </div>
       </div>
