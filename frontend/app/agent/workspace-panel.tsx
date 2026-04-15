@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { usePathname } from "next/navigation";
 import {
   FolderTree, ChevronRight, ChevronDown, FileCode2, FileJson,
   Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder,
@@ -71,142 +72,315 @@ function TerminalLine({ entry }: { entry: { timestamp: string; type: string; tex
   );
 }
 
-// ─── Preview Panel ────────────────────────────────────────────────────────────
+// ─── Real Shell Terminal ───────────────────────────────────────────────────────
 //
-// The VFS lives in-browser memory — there is no real shell available.
-// We cannot actually run `npm run dev` inside the browser.
-// This panel:
-//   1. Explains the correct workflow (export → run locally)
-//   2. Shows the exact commands to run in the user's real terminal
-//   3. Lets the user paste their actual localhost URL and open it in a new tab
+// Architecture:
+//   1. "Setup" button: POST /api/shell/write-vfs → writes VFS files to OS temp dir
+//   2. Command input: POST /api/shell { command, cwd } → SSE-streamed output
+//   3. Stop button:  DELETE /api/shell { pid }        → kills the process
+
+interface ShellLine {
+  id: number;
+  type: "input" | "stdout" | "stderr" | "system" | "error";
+  text: string;
+}
+
+let lineCounter = 0;
+const mkLine = (type: ShellLine["type"], text: string): ShellLine => ({
+  id: ++lineCounter,
+  type,
+  text,
+});
 
 function PreviewTerminal({ projectName }: { projectName: string }) {
-  const [customUrl, setCustomUrl] = useState("http://localhost:3000");
-  const [copied, setCopied] = useState<string | null>(null);
+  const { vfs } = useAgent();
+  const pathname = usePathname();
+  const chatId = pathname?.match(/\/agent\/chat\/(\d+)/)?.[1] ?? "0";
 
-  const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(label);
-      setTimeout(() => setCopied(null), 1800);
-    });
+  const [lines, setLines] = useState<ShellLine[]>([
+    mkLine("system", "DevMind Real Shell — connected to Next.js server process"),
+    mkLine("system", 'Click "Setup Project" to write files to disk, then run commands.'),
+  ]);
+  const [input, setInput] = useState("");
+  const [workDir, setWorkDir] = useState<string | null>(null);
+  const [settingUp, setSettingUp] = useState(false);
+  const [runningPid, setRunningPid] = useState<number | null>(null);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const [histIdx, setHistIdx] = useState(-1);
+  const [serverPort, setServerPort] = useState<number | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const addLine = useCallback((line: ShellLine) => {
+    setLines((prev) => [...prev, line]);
+  }, []);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines]);
+
+  // ── Step 1: Write VFS to disk ──────────────────────────────────────
+  const setupProject = async () => {
+    setSettingUp(true);
+    addLine(mkLine("system", `📁 Writing ${Object.keys(vfs).length} files to disk...`));
+    try {
+      const res = await fetch("/api/shell/write-vfs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId, vfs }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setWorkDir(data.workDir);
+      addLine(mkLine("system", `✅ Project ready at: ${data.workDir}`));
+      addLine(mkLine("system", `📦 ${data.fileCount} files written. Run: npm install`));
+    } catch (err: any) {
+      addLine(mkLine("error", `❌ Setup failed: ${err.message}`));
+    } finally {
+      setSettingUp(false);
+    }
   };
 
-  const openInBrowser = () => {
-    const url = customUrl.trim() || "http://localhost:3000";
-    const full = url.startsWith("http") ? url : `http://${url}`;
-    window.open(full, "_blank", "noopener,noreferrer");
+  // ── Step 2: Run a real command via SSE ─────────────────────────────
+  const runCommand = useCallback(async (cmd: string) => {
+    const trimmed = cmd.trim();
+    if (!trimmed || runningPid !== null) return;
+
+    addLine(mkLine("input", `$ ${trimmed}`));
+    setCmdHistory((h) => [trimmed, ...h.slice(0, 49)]);
+    setHistIdx(-1);
+    setInput("");
+
+    const cwd = workDir ?? process.cwd();
+
+    // Detect port from command output
+    const portRe = /localhost:(\d{4,5})|0\.0\.0\.0:(\d{4,5})|port\s+(\d{4,5})/i;
+
+    try {
+      const res = await fetch("/api/shell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: trimmed, cwd }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Unknown error" }));
+        addLine(mkLine("error", `❌ ${err.error}`));
+        return;
+      }
+
+      if (!res.body) {
+        addLine(mkLine("error", "❌ No response body"));
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const event of events) {
+          if (!event.startsWith("data:")) continue;
+          try {
+            const payload = JSON.parse(event.replace(/^data:\s*/, "")) as {
+              type: string;
+              data?: string;
+              pid?: number;
+              code?: number;
+              message?: string;
+            };
+
+            if (payload.type === "pid") {
+              setRunningPid(payload.pid!);
+              console.log(`[SHELL] Process PID: ${payload.pid}`);
+            } else if (payload.type === "stdout") {
+              const text = payload.data ?? "";
+              addLine(mkLine("stdout", text.trimEnd()));
+              // Auto-detect port
+              const match = text.match(portRe);
+              if (match) {
+                const port = Number(match[1] ?? match[2] ?? match[3]);
+                if (port) setServerPort(port);
+              }
+            } else if (payload.type === "stderr") {
+              addLine(mkLine("stderr", (payload.data ?? "").trimEnd()));
+            } else if (payload.type === "exit") {
+              setRunningPid(null);
+              addLine(mkLine("system", `Process exited with code ${payload.code}`));
+            } else if (payload.type === "error") {
+              setRunningPid(null);
+              addLine(mkLine("error", `❌ ${payload.message}`));
+            }
+          } catch {
+            // malformed event, skip
+          }
+        }
+      }
+    } catch (err: any) {
+      addLine(mkLine("error", `❌ ${err.message}`));
+      setRunningPid(null);
+    }
+  }, [workDir, runningPid, addLine]);
+
+  // ── Step 3: Stop running process ───────────────────────────────────
+  const stopProcess = async () => {
+    if (!runningPid) return;
+    addLine(mkLine("system", `^C — stopping PID ${runningPid}...`));
+    try {
+      await fetch("/api/shell", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pid: runningPid }),
+      });
+      setRunningPid(null);
+      setServerPort(null);
+    } catch (err: any) {
+      addLine(mkLine("error", `Kill failed: ${err.message}`));
+    }
   };
 
-  const steps: { cmd: string; label: string }[] = [
-    { cmd: "cd ~Downloads && unzip project.zip", label: "1. Extract ZIP" },
-    { cmd: "npm install", label: "2. Install deps" },
-    { cmd: "npm run dev", label: "3. Start server" },
-  ];
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") { runCommand(input); return; }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = Math.min(histIdx + 1, cmdHistory.length - 1);
+      setHistIdx(next);
+      setInput(cmdHistory[next] ?? "");
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = Math.max(histIdx - 1, -1);
+      setHistIdx(next);
+      setInput(next === -1 ? "" : cmdHistory[next] ?? "");
+    }
+    if (e.key === "l" && e.ctrlKey) {
+      e.preventDefault();
+      setLines([mkLine("system", "DevMind Shell")]);
+    }
+  };
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-[#0d1117] font-mono overflow-y-auto">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-[#010409] border-b border-[#30363d] shrink-0">
-        <MonitorPlay className="w-3.5 h-3.5 text-[#8b949e]" />
-        <span className="text-[11px] text-[#8b949e] font-semibold uppercase tracking-wider">Preview</span>
-        <span className="text-[10px] text-[#484f58]">{projectName}</span>
-        <span className="ml-auto text-[9px] text-[#484f58] bg-[#161b22] border border-[#30363d] px-2 py-0.5 rounded">
-          Browser-only · no shell access
-        </span>
-      </div>
-
-      {/* Explanation notice */}
-      <div className="mx-3 mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 shrink-0">
-        <p className="text-[11px] text-amber-400/80 leading-relaxed">
-          <span className="font-semibold text-amber-400">ℹ️ How preview works</span><br />
-          DevMind files live in browser memory. To preview your project, export a ZIP, extract it, and run it in your own terminal below.
-        </p>
-      </div>
-
-      {/* Step-by-step run guide */}
-      <div className="px-3 pt-3 shrink-0">
-        <span className="text-[9px] text-[#8b949e] uppercase tracking-wider font-semibold">Run steps</span>
-        <div className="mt-1.5 space-y-1.5">
-          {steps.map(({ cmd, label }) => (
-            <div key={cmd} className="flex items-center justify-between gap-2 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2">
-              <div className="min-w-0">
-                <p className="text-[9px] text-[#484f58] uppercase tracking-wide">{label}</p>
-                <p className="text-[11px] text-[#c9d1d9] font-mono truncate">{cmd}</p>
-              </div>
-              <button
-                onClick={() => copyToClipboard(cmd, label)}
-                className="shrink-0 text-[9px] text-[#8b949e] hover:text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
-                title="Copy command"
-              >
-                {copied === label ? "✓ Copied" : "Copy"}
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Divider */}
-      <div className="flex items-center gap-2 px-3 mt-4 shrink-0">
-        <div className="flex-1 h-px bg-[#30363d]" />
-        <span className="text-[9px] text-[#484f58] uppercase tracking-wider">Then open in browser</span>
-        <div className="flex-1 h-px bg-[#30363d]" />
-      </div>
-
-      {/* URL input + open button */}
-      <div className="px-3 pt-3 pb-4 shrink-0">
-        <p className="text-[9px] text-[#8b949e] uppercase tracking-wider mb-1.5">Localhost URL</p>
+    <div className="absolute inset-0 flex flex-col bg-[#0d1117] font-mono">
+      {/* Header bar */}
+      <div className="flex items-center justify-between px-3 py-2 bg-[#010409] border-b border-[#30363d] shrink-0">
         <div className="flex items-center gap-2">
-          <div className="flex-1 flex items-center gap-1.5 border border-[#30363d] rounded-md bg-[#161b22] px-2.5 py-1.5 focus-within:border-primary/50 transition-colors">
-            <Wifi className="w-3 h-3 text-[#484f58] shrink-0" />
-            <input
-              value={customUrl}
-              onChange={(e) => setCustomUrl(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") openInBrowser(); }}
-              placeholder="http://localhost:3000"
-              spellCheck={false}
-              className="flex-1 bg-transparent text-[11px] text-[#c9d1d9] outline-none placeholder:text-[#484f58] font-mono"
-            />
-          </div>
-          <button
-            onClick={openInBrowser}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary/90 hover:bg-primary text-primary-foreground text-[11px] font-medium transition-colors shrink-0"
-            title="Open in new tab"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-            Open
-          </button>
+          <Terminal className="w-3.5 h-3.5 text-[#8b949e]" />
+          <span className="text-[11px] text-[#8b949e] font-semibold uppercase tracking-wider">Shell</span>
+          <span className="text-[10px] text-[#484f58]">{projectName}</span>
+          {workDir && (
+            <span className="text-[9px] text-emerald-400/70 truncate max-w-[160px]" title={workDir}>
+              📁 {workDir.split(/[\\/]/).slice(-2).join("/")}
+            </span>
+          )}
         </div>
-        <p className="text-[9px] text-[#484f58] mt-1.5">
-          Enter the port your dev server is running on, then click Open ↗
-        </p>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Server status + open preview */}
+          {serverPort && (
+            <button
+              onClick={() => window.open(`http://localhost:${serverPort}`, "_blank", "noopener,noreferrer")}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-[10px] transition-colors"
+            >
+              <ExternalLink className="w-2.5 h-2.5" /> Open :{serverPort}
+            </button>
+          )}
+
+          {/* Stop running process */}
+          {runningPid && (
+            <button
+              onClick={stopProcess}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-[10px] transition-colors"
+            >
+              <Square className="w-2.5 h-2.5" /> Stop ({runningPid})
+            </button>
+          )}
+
+          {/* Setup project button */}
+          {!workDir && (
+            <button
+              onClick={setupProject}
+              disabled={settingUp || Object.keys(vfs).length === 0}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Play className="w-2.5 h-2.5" />
+              {settingUp ? "Setting up..." : "Setup Project"}
+            </button>
+          )}
+          {workDir && !runningPid && (
+            <button
+              onClick={() => { setWorkDir(null); setServerPort(null); setupProject(); }}
+              className="text-[9px] text-[#484f58] hover:text-[#8b949e] transition-colors"
+              title="Re-write files to disk"
+            >
+              ↻ Resync
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Common ports quick pick */}
-      <div className="px-3 pb-3 shrink-0">
-        <p className="text-[9px] text-[#484f58] uppercase tracking-wider mb-1.5">Common ports</p>
-        <div className="flex flex-wrap gap-1.5">
-          {[
-            { label: "Next.js / Vite", port: 3000 },
-            { label: "Vite alt", port: 5173 },
-            { label: "React CRA", port: 3001 },
-            { label: "Node / Express", port: 8000 },
-            { label: "Django", port: 8080 },
-          ].map(({ label, port }) => (
+      {/* Terminal output */}
+      <div
+        className="flex-1 overflow-y-auto p-3 space-y-0.5 text-[11px] leading-relaxed cursor-text"
+        onClick={() => inputRef.current?.focus()}
+      >
+        {lines.map((line) => (
+          <div key={line.id} className={
+            line.type === "input"  ? "text-[#f0883e]" :
+            line.type === "stdout" ? "text-[#c9d1d9]" :
+            line.type === "stderr" ? "text-[#ffa657]" :
+            line.type === "error"  ? "text-[#ff7b72]" :
+            "text-[#8b949e] italic"
+          }>
+            {line.text}
+          </div>
+        ))}
+        {runningPid && (
+          <div className="flex items-center gap-1.5 text-[10px] text-[#484f58]">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+            <span>PID {runningPid} running... (Ctrl+C or click Stop)</span>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input row */}
+      <div className="flex items-center gap-2 px-3 py-2 border-t border-[#30363d] bg-[#010409] shrink-0">
+        <span className="text-[#f0883e] text-[11px] shrink-0">$</span>
+        <input
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={workDir ? "npm run dev" : "Click 'Setup Project' first..."}
+          disabled={!workDir || runningPid !== null}
+          spellCheck={false}
+          autoFocus
+          className="flex-1 bg-transparent text-[#c9d1d9] text-[11px] outline-none placeholder:text-[#484f58] font-mono caret-[#c9d1d9] disabled:opacity-40"
+        />
+      </div>
+
+      {/* Quick command buttons */}
+      {workDir && !runningPid && (
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-[#30363d] bg-[#010409]/60 shrink-0 flex-wrap">
+          <span className="text-[9px] text-[#484f58] uppercase tracking-wider">Quick:</span>
+          {["npm install", "npm run dev", "npm run build", "ls", "pwd"].map((cmd) => (
             <button
-              key={port}
-              onClick={() => setCustomUrl(`http://localhost:${port}`)}
-              className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
-                customUrl === `http://localhost:${port}`
-                  ? "border-primary/50 bg-primary/10 text-primary"
-                  : "border-[#30363d] text-[#8b949e] hover:text-[#c9d1d9] bg-[#161b22] hover:bg-[#21262d]"
-              }`}
-              title={label}
+              key={cmd}
+              onClick={() => runCommand(cmd)}
+              className="text-[9px] font-mono text-[#8b949e] hover:text-[#c9d1d9] bg-[#161b22] hover:bg-[#21262d] px-2 py-0.5 rounded border border-[#30363d] transition-colors"
             >
-              :{port}
+              {cmd}
             </button>
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }
