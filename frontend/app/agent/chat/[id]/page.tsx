@@ -21,7 +21,7 @@ export default function AgentChatPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { vfs, applyActions, addLogEntry, addConversationTurn, conversationHistory, projectName, projectMode, setProjectMode } = useAgent();
+  const { vfs, applyActions, addLogEntry, addConversationTurn, conversationHistory, projectName, projectMode, setProjectMode, projectContext, generateAndSaveContext } = useAgent();
 
   useEffect(() => {
     if (!chatId) return;
@@ -54,6 +54,25 @@ export default function AgentChatPage() {
     setMessages((prev) => [...prev, { id: placeholderId, role: "ai", content: "⏳ Thinking..." }]);
 
     try {
+      // ── Step 1: Ensure project context is available ──
+      let activeContext = projectContext;
+      if (!activeContext) {
+        console.log(`[AGENT] ⚠️  No project context found — generating on-demand before agent turn...`);
+        addLogEntry({ type: "system", text: `🧠 Analyzing project structure...` });
+        activeContext = await generateAndSaveContext();
+        if (activeContext) {
+          console.log(`[AGENT] ✅ On-demand context ready: "${activeContext.purpose}"`);
+        } else {
+          console.log(`[AGENT] ⚠️  Context generation failed — proceeding without context`);
+        }
+      } else {
+        console.log(`[AGENT] ✅ Project context available: "${activeContext.purpose}"`);
+        console.log(`[AGENT] 🔧 Tech stack: [${activeContext.techStack.join(", ")}]`);
+      }
+
+      // ── Step 2: Run the agent turn with context ──
+      console.log(`[AGENT] 🚀 Running agent turn with context: ${activeContext ? "YES" : "NO"}`);
+
       // No API key needed — the agent turn is proxied via /api/agent-turn server-side
 
       const agentResponse = await runAgentTurn(
@@ -62,7 +81,8 @@ export default function AgentChatPage() {
           if (action.type === "create_file" && action.path) addLogEntry({ type: "create_file", text: `+ ${action.path}`, path: action.path });
           else if (action.type === "edit_file" && action.path) addLogEntry({ type: "edit_file", text: `~ ${action.path}`, path: action.path });
           else if (action.type === "delete_file" && action.path) addLogEntry({ type: "delete_file", text: `- ${action.path}`, path: action.path });
-        }
+        },
+        activeContext
       );
 
       applyActions(agentResponse.actions);

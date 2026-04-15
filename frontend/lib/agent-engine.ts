@@ -3,6 +3,13 @@
  *
  * Manages the Virtual File System (VFS), builds structured prompts for Gemini,
  * and parses the agent's JSON-formatted action responses.
+ *
+ * Project context (ProjectContext) is injected into the system prompt when
+ * available, enabling the agent to:
+ *   - Know the tech stack before generating code
+ *   - Identify existing key files to avoid duplication
+ *   - Follow established coding conventions
+ *   - Decide intelligently whether to CREATE or MODIFY files
  */
 
 // ─────────────────────────────────────────
@@ -11,6 +18,8 @@
 
 // raidenAI is intentionally NOT imported here — it runs server-side only.
 // Client-side calls go via POST /api/agent-turn to avoid CORS restrictions.
+
+import type { ProjectContext } from "./project-context";
 
 /** Flat map of file paths to their string content */
 export type VirtualFileSystem = Record<string, string>;
@@ -33,6 +42,24 @@ export interface AgentResponse {
   actions: AgentAction[];
   message: string;
   needs_iteration?: boolean;
+}
+
+/** A single planned file operation decided in Phase 1 */
+export interface AgentOperation {
+  /** What to do */
+  action: "create" | "modify" | "delete" | "message";
+  /** Target file path (relative) */
+  path: string;
+  /** Brief reason for this decision */
+  reason: string;
+}
+
+/** The full plan returned by Phase 1 */
+export interface AgentPlan {
+  thinking: string;
+  operations: AgentOperation[];
+  /** Optional direct reply (used when action === "message") */
+  message?: string;
 }
 
 export interface AgentLogEntry {
@@ -190,39 +217,201 @@ export function getStarterVFS(projectName: string, projectType: string): Virtual
 }
 
 // ─────────────────────────────────────────
-// System Prompt Builder
+// Phase 1 — Planning Prompt & Parser
 // ─────────────────────────────────────────
 
-export function buildSystemPrompt(
+/**
+ * Builds the planning prompt.
+ * The AI reads the full file list + project context and returns a JSON plan:
+ * which files to CREATE / MODIFY / DELETE and why.
+ */
+function buildPlanningPrompt(
+  userMessage: string,
   vfs: VirtualFileSystem,
   projectName: string,
-  history: ConversationTurn[]
+  projectContext?: ProjectContext | null,
+  history?: ConversationTurn[]
 ): string {
-  // Use compact VFS serialization — budget ~2500 chars for file content
-  const vfsStr = serializeVFS(vfs, 2500);
+  const paths = Object.keys(vfs);
+  // Full path list — planning only needs names, not content
+  const fileList = paths.length > 0
+    ? paths.map((p) => `  - ${p}`).join("\n")
+    : "  (no files yet)";
 
-  // Only keep last 4 turns to save space
-  const historyStr =
-    history.length > 0
-      ? history
-          .slice(-4)
-          .map((t) => `${t.role === "user" ? "U" : "A"}: ${t.content.slice(0, 150)}`)
-          .join("\n")
-      : "";
+  let contextBlock = "";
+  if (projectContext) {
+    contextBlock = `\nProject Context:
+- Purpose: ${projectContext.purpose}
+- Tech Stack: ${projectContext.techStack.join(", ")}
+- Key Files: ${projectContext.keyFiles.join(", ")}
+- Conventions: ${projectContext.conventions}\n`;
+  }
 
-  // Compact system prompt — every character counts for URL-based API
-  return `You are DevMind, an AI coding agent. Create/edit/delete files in a Virtual File System.
+  const historyStr = history && history.length > 0
+    ? `\nRecent conversation:\n${history.slice(-3).map((t) => `${t.role === "user" ? "User" : "Agent"}: ${t.content.slice(0, 120)}`).join("\n")}`
+    : "";
 
-Project: "${projectName}" (${Object.keys(vfs).length} files)
+  return `You are DevMind, a coding agent. Analyze this request and plan the file operations needed.
 
-## Files
-${vfsStr}
-${historyStr ? `\n## History\n${historyStr}` : ""}
+Project: "${projectName}" (${paths.length} files)${contextBlock}
+Current file structure:
+${fileList}${historyStr}
 
-## RESPOND WITH ONLY VALID JSON:
-{"thinking":"reasoning","actions":[{"type":"create_file","path":"path/file.tsx","content":"full content"},{"type":"edit_file","path":"path","content":"full new content"},{"type":"delete_file","path":"path"}],"message":"explanation","needs_iteration":false}
+User request: "${userMessage}"
 
-Rules: Write COMPLETE file content. Use relative paths. Empty actions array if no changes needed.`;
+Decision rules:
+- Prefer MODIFY over CREATE — if a relevant file already exists, edit it instead of making a new one.
+- Only CREATE when the feature is clearly new and no existing file fits.
+- Use exact existing paths for modify/delete operations.
+- For CREATE, choose paths that match this project's structure and naming conventions.
+- If no file changes are needed (question, greeting, etc.), use action "message".
+
+Respond with ONLY valid JSON — no markdown fences:
+{"thinking":"<step-by-step reasoning: which files you checked, why you chose create vs modify>","operations":[{"action":"create|modify|delete|message","path":"relative/path/file.tsx","reason":"<brief reason>"}],"message":"<optional short summary for the user>"}`;
+}
+
+/** Parse Phase 1 planning response into an AgentPlan */
+function parsePlanResponse(rawText: string): AgentPlan {
+  let cleaned = rawText.trim();
+
+  // Strip markdown fences
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) cleaned = fenceMatch[1].trim();
+
+  const startIdx = cleaned.indexOf("{");
+  const endIdx = cleaned.lastIndexOf("}");
+  if (startIdx !== -1 && endIdx !== -1) cleaned = cleaned.slice(startIdx, endIdx + 1);
+
+  try {
+    const parsed = JSON.parse(cleaned) as AgentPlan;
+    return {
+      thinking: parsed.thinking ?? "",
+      operations: Array.isArray(parsed.operations) ? parsed.operations : [],
+      message: parsed.message,
+    };
+  } catch {
+    console.warn("[AGENT] ⚠️  Failed to parse plan JSON — treating as message", cleaned.slice(0, 200));
+    return { thinking: "", operations: [{ action: "message", path: "", reason: "fallback" }], message: rawText.slice(0, 400) };
+  }
+}
+
+// ─────────────────────────────────────────
+// Phase 2 — Execution Prompts
+// ─────────────────────────────────────────
+
+/**
+ * Builds the prompt for CREATE operations.
+ * Gives the AI the project structure + context so it places
+ * correct imports and follows existing conventions.
+ */
+function buildCreatePrompt(
+  op: AgentOperation,
+  userMessage: string,
+  vfs: VirtualFileSystem,
+  projectName: string,
+  projectContext?: ProjectContext | null
+): string {
+  // Include content of related/sibling files as style reference
+  const targetDir = op.path.includes("/") ? op.path.split("/").slice(0, -1).join("/") : "";
+  const siblingFiles: string[] = [];
+  let siblingContent = "";
+  let charBudget = 1500;
+
+  for (const [path, content] of Object.entries(vfs)) {
+    const isRelated = targetDir
+      ? path.startsWith(targetDir)
+      : !path.includes("/"); // root-level neighbors
+    if (isRelated && path !== op.path && charBudget > 0) {
+      const snippet = content.slice(0, Math.min(400, charBudget));
+      siblingContent += `\n### ${path}\n\`\`\`\n${snippet}${content.length > 400 ? "\n...(truncated)" : ""}\n\`\`\``;
+      charBudget -= snippet.length;
+      siblingFiles.push(path);
+    }
+  }
+
+  const fileList = Object.keys(vfs).slice(0, 40).map((p) => `  - ${p}`).join("\n");
+
+  let contextBlock = "";
+  if (projectContext) {
+    contextBlock = `\nProject context:
+- Tech Stack: ${projectContext.techStack.join(", ")}
+- Conventions: ${projectContext.conventions}\n`;
+  }
+
+  return `You are DevMind, a coding agent. Create a new file for this project.
+
+Project: "${projectName}"${contextBlock}
+File to create: ${op.path}
+Reason: ${op.reason}
+
+User request: "${userMessage}"
+
+Full project structure:
+${fileList}${siblingFiles.length > 0 ? `\n\nRelated files for reference (follow their style/imports):
+${siblingContent}` : ""}
+
+Write the COMPLETE, production-ready content for "${op.path}".
+Follow the existing code style. Use correct import paths (relative to file location).
+Return ONLY the raw file content — no JSON, no markdown fences, no explanation.`;
+}
+
+/**
+ * Builds the prompt for MODIFY operations.
+ * Reads the FULL current file content and asks the AI to produce the updated version.
+ */
+function buildModifyPrompt(
+  op: AgentOperation,
+  userMessage: string,
+  vfs: VirtualFileSystem,
+  projectName: string,
+  projectContext?: ProjectContext | null
+): string {
+  const existingContent = vfs[op.path] ?? "";
+
+  let contextBlock = "";
+  if (projectContext) {
+    contextBlock = `\nProject context:
+- Tech Stack: ${projectContext.techStack.join(", ")}
+- Conventions: ${projectContext.conventions}\n`;
+  }
+
+  return `You are DevMind, a coding agent. Modify an existing file.
+
+Project: "${projectName}"${contextBlock}
+File to modify: ${op.path}
+Reason: ${op.reason}
+
+User request: "${userMessage}"
+
+Current content of "${op.path}":
+\`\`\`
+${existingContent}
+\`\`\`
+
+Update this file to fulfill the user's request.
+Keep all existing functionality intact — only add, change, or remove what's necessary.
+Write the COMPLETE updated file content.
+Return ONLY the raw file content — no JSON, no markdown fences, no explanation.`;
+}
+
+// ─────────────────────────────────────────
+// Internal API caller helper
+// ─────────────────────────────────────────
+
+async function callAgentAPI(prompt: string, label: string): Promise<string> {
+  console.log(`[AGENT] 📡 ${label} — sending prompt (${prompt.length} chars)`);
+  const response = await fetch("/api/agent-turn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(err.error || `Agent API error: ${response.status}`);
+  }
+  const { rawText } = await response.json();
+  console.log(`[AGENT] 📥 ${label} — response received (${rawText?.length ?? 0} chars)`);
+  return rawText ?? "";
 }
 
 // ─────────────────────────────────────────
@@ -264,43 +453,149 @@ export function parseAgentResponse(rawText: string): AgentResponse {
 }
 
 // ─────────────────────────────────────────
-// Main Agent Call (client-side → proxies via /api/agent-turn)
+// Main Agent Orchestrator — Two-Phase Pipeline
 // ─────────────────────────────────────────
 
+/**
+ * runAgentTurn — Two-phase agentic pipeline:
+ *
+ * Phase 1 (Plan): Ask the AI to decide WHAT operations to perform
+ *   → which files to create / modify / delete and why
+ *
+ * Phase 2 (Execute): For each operation, run a targeted AI call:
+ *   CREATE  → Read file structure → Generate complete new file content
+ *   MODIFY  → Read existing file content → Generate updated content
+ *   DELETE  → No AI needed — remove from VFS directly
+ *   MESSAGE → No file changes, just return the AI's reply
+ *
+ * Every step is console-logged for debugging.
+ */
 export async function runAgentTurn(
   userMessage: string,
   vfs: VirtualFileSystem,
   projectName: string,
   history: ConversationTurn[],
   apiKey: string,
-  onAction?: (action: AgentAction) => void
+  onAction?: (action: AgentAction) => void,
+  projectContext?: ProjectContext | null
 ): Promise<AgentResponse> {
-  const systemPrompt = buildSystemPrompt(vfs, projectName, history);
-  const fullPrompt = `${systemPrompt}\n\n## User Request\n${userMessage}`;
+  console.log(`[AGENT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`[AGENT] 🤖 New agent turn started`);
+  console.log(`[AGENT]    Request : "${userMessage.slice(0, 100)}${userMessage.length > 100 ? "..." : ""}"`);
+  console.log(`[AGENT]    VFS     : ${Object.keys(vfs).length} files`);
+  console.log(`[AGENT]    Context : ${projectContext ? `"${projectContext.purpose.slice(0, 60)}"` : "not available"}`);
+  console.log(`[AGENT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-  // POST to the server-side proxy route to avoid CORS issues with the Raiden API
-  const response = await fetch("/api/agent-turn", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: fullPrompt }),
+  // ──────────────────────────────────────
+  // PHASE 1 — Plan
+  // ──────────────────────────────────────
+  console.log(`[AGENT] 📋 Phase 1: Planning...`);
+  const planningPrompt = buildPlanningPrompt(userMessage, vfs, projectName, projectContext, history);
+  const planRawText = await callAgentAPI(planningPrompt, "Phase 1 / Plan");
+  const plan = parsePlanResponse(planRawText);
+
+  console.log(`[AGENT] 🧠 Thinking: ${plan.thinking.slice(0, 200)}`);
+  console.log(`[AGENT] 📝 Plan: ${plan.operations.length} operation(s) decided:`);
+  plan.operations.forEach((op, i) => {
+    const icon = op.action === "create" ? "➕" : op.action === "modify" ? "✏️" : op.action === "delete" ? "🗑️" : "💬";
+    console.log(`[AGENT]    ${i + 1}. ${icon} ${op.action.toUpperCase()} → ${op.path || "(message)"} — ${op.reason}`);
   });
 
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: "Unknown error" }));
-    throw new Error(err.error || `Agent API error: ${response.status}`);
-  }
+  // ──────────────────────────────────────
+  // PHASE 2 — Execute each operation
+  // ──────────────────────────────────────
+  const actions: AgentAction[] = [];
+  const summaryParts: string[] = [];
 
-  const { rawText } = await response.json();
-  const parsed = parseAgentResponse(rawText);
+  for (const op of plan.operations) {
+    console.log(`[AGENT] ⚙️  Phase 2: Executing ${op.action.toUpperCase()} → ${op.path || "(message)"}`);
 
-  // Fire action callbacks for progressive updates
-  if (onAction) {
-    for (const action of parsed.actions) {
-      onAction(action);
+    if (op.action === "delete") {
+      // ── DELETE: no AI call needed ──
+      if (!op.path || !vfs[op.path]) {
+        console.warn(`[AGENT] ⚠️  DELETE skipped — path not found in VFS: "${op.path}"`);
+        summaryParts.push(`Could not delete \`${op.path}\` (file not found).`);
+        continue;
+      }
+      console.log(`[AGENT] 🗑️  Removing file: ${op.path}`);
+      const deleteAction: AgentAction = { type: "delete_file", path: op.path };
+      actions.push(deleteAction);
+      if (onAction) onAction(deleteAction);
+      summaryParts.push(`Deleted \`${op.path}\`.`);
+
+    } else if (op.action === "create") {
+      // ── CREATE: generate complete new file ──
+      console.log(`[AGENT] ➕ Creating new file: ${op.path}`);
+      console.log(`[AGENT]    Reading file structure for context...`);
+      const createPrompt = buildCreatePrompt(op, userMessage, vfs, projectName, projectContext);
+      const rawContent = await callAgentAPI(createPrompt, `Phase 2 / Create ${op.path}`);
+
+      // The AI returns raw file content (not JSON)
+      const fileContent = rawContent.trim();
+      console.log(`[AGENT] ✅ File generated: ${op.path} (${fileContent.length} chars)`);
+
+      const createAction: AgentAction = { type: "create_file", path: op.path, content: fileContent };
+      actions.push(createAction);
+      if (onAction) onAction(createAction);
+      summaryParts.push(`Created \`${op.path}\`.`);
+
+    } else if (op.action === "modify") {
+      // ── MODIFY: read existing content, then generate updated version ──
+      if (!op.path) {
+        console.warn(`[AGENT] ⚠️  MODIFY skipped — no path specified`);
+        continue;
+      }
+
+      const currentContent = vfs[op.path];
+      if (currentContent === undefined) {
+        // File doesn't exist — fall back to CREATE
+        console.warn(`[AGENT] ⚠️  MODIFY target not found in VFS: "${op.path}" — falling back to CREATE`);
+        const createPrompt = buildCreatePrompt(
+          { ...op, action: "create" },
+          userMessage, vfs, projectName, projectContext
+        );
+        const rawContent = await callAgentAPI(createPrompt, `Phase 2 / Create (fallback) ${op.path}`);
+        const createAction: AgentAction = { type: "create_file", path: op.path, content: rawContent.trim() };
+        actions.push(createAction);
+        if (onAction) onAction(createAction);
+        summaryParts.push(`Created \`${op.path}\` (file was not found, created instead).`);
+        continue;
+      }
+
+      console.log(`[AGENT] 📖 Reading existing content of: ${op.path} (${currentContent.length} chars)`);
+      const modifyPrompt = buildModifyPrompt(op, userMessage, vfs, projectName, projectContext);
+      const rawContent = await callAgentAPI(modifyPrompt, `Phase 2 / Modify ${op.path}`);
+
+      const updatedContent = rawContent.trim();
+      console.log(`[AGENT] ✅ File updated: ${op.path} (${currentContent.length} → ${updatedContent.length} chars)`);
+
+      const editAction: AgentAction = { type: "edit_file", path: op.path, content: updatedContent };
+      actions.push(editAction);
+      if (onAction) onAction(editAction);
+      summaryParts.push(`Modified \`${op.path}\`.`);
+
+    } else {
+      // ── MESSAGE: AI-only response, no file changes ──
+      console.log(`[AGENT] 💬 Message-only operation (no file changes)`);
+      summaryParts.push(plan.message || planRawText.slice(0, 400));
     }
   }
 
-  return parsed;
+  // Build final summary message
+  const finalMessage = summaryParts.length > 0
+    ? summaryParts.join(" ")
+    : plan.message || "Done.";
+
+  console.log(`[AGENT] ✅ Turn complete — ${actions.length} action(s) applied`);
+  console.log(`[AGENT] 📨 Message: ${finalMessage.slice(0, 150)}`);
+  console.log(`[AGENT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+  return {
+    thinking: plan.thinking,
+    actions,
+    message: finalMessage,
+    needs_iteration: false,
+  };
 }
 
 // ─────────────────────────────────────────

@@ -4,7 +4,7 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import {
   FolderTree, ChevronRight, ChevronDown, FileCode2, FileJson,
   Code2, MonitorPlay, Terminal, Sparkles, Download, File, Folder,
-  ChevronUp, Maximize2, X,
+  ChevronUp, Maximize2, X, Play, Square, ExternalLink, Wifi, WifiOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -71,7 +71,149 @@ function TerminalLine({ entry }: { entry: { timestamp: string; type: string; tex
   );
 }
 
-// Shared log content body
+// ─── Preview Panel ────────────────────────────────────────────────────────────
+//
+// The VFS lives in-browser memory — there is no real shell available.
+// We cannot actually run `npm run dev` inside the browser.
+// This panel:
+//   1. Explains the correct workflow (export → run locally)
+//   2. Shows the exact commands to run in the user's real terminal
+//   3. Lets the user paste their actual localhost URL and open it in a new tab
+
+function PreviewTerminal({ projectName }: { projectName: string }) {
+  const [customUrl, setCustomUrl] = useState("http://localhost:3000");
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copyToClipboard = (text: string, label: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(label);
+      setTimeout(() => setCopied(null), 1800);
+    });
+  };
+
+  const openInBrowser = () => {
+    const url = customUrl.trim() || "http://localhost:3000";
+    const full = url.startsWith("http") ? url : `http://${url}`;
+    window.open(full, "_blank", "noopener,noreferrer");
+  };
+
+  const steps: { cmd: string; label: string }[] = [
+    { cmd: "cd ~Downloads && unzip project.zip", label: "1. Extract ZIP" },
+    { cmd: "npm install", label: "2. Install deps" },
+    { cmd: "npm run dev", label: "3. Start server" },
+  ];
+
+  return (
+    <div className="absolute inset-0 flex flex-col bg-[#0d1117] font-mono overflow-y-auto">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-[#010409] border-b border-[#30363d] shrink-0">
+        <MonitorPlay className="w-3.5 h-3.5 text-[#8b949e]" />
+        <span className="text-[11px] text-[#8b949e] font-semibold uppercase tracking-wider">Preview</span>
+        <span className="text-[10px] text-[#484f58]">{projectName}</span>
+        <span className="ml-auto text-[9px] text-[#484f58] bg-[#161b22] border border-[#30363d] px-2 py-0.5 rounded">
+          Browser-only · no shell access
+        </span>
+      </div>
+
+      {/* Explanation notice */}
+      <div className="mx-3 mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 shrink-0">
+        <p className="text-[11px] text-amber-400/80 leading-relaxed">
+          <span className="font-semibold text-amber-400">ℹ️ How preview works</span><br />
+          DevMind files live in browser memory. To preview your project, export a ZIP, extract it, and run it in your own terminal below.
+        </p>
+      </div>
+
+      {/* Step-by-step run guide */}
+      <div className="px-3 pt-3 shrink-0">
+        <span className="text-[9px] text-[#8b949e] uppercase tracking-wider font-semibold">Run steps</span>
+        <div className="mt-1.5 space-y-1.5">
+          {steps.map(({ cmd, label }) => (
+            <div key={cmd} className="flex items-center justify-between gap-2 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2">
+              <div className="min-w-0">
+                <p className="text-[9px] text-[#484f58] uppercase tracking-wide">{label}</p>
+                <p className="text-[11px] text-[#c9d1d9] font-mono truncate">{cmd}</p>
+              </div>
+              <button
+                onClick={() => copyToClipboard(cmd, label)}
+                className="shrink-0 text-[9px] text-[#8b949e] hover:text-[#c9d1d9] bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
+                title="Copy command"
+              >
+                {copied === label ? "✓ Copied" : "Copy"}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Divider */}
+      <div className="flex items-center gap-2 px-3 mt-4 shrink-0">
+        <div className="flex-1 h-px bg-[#30363d]" />
+        <span className="text-[9px] text-[#484f58] uppercase tracking-wider">Then open in browser</span>
+        <div className="flex-1 h-px bg-[#30363d]" />
+      </div>
+
+      {/* URL input + open button */}
+      <div className="px-3 pt-3 pb-4 shrink-0">
+        <p className="text-[9px] text-[#8b949e] uppercase tracking-wider mb-1.5">Localhost URL</p>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex items-center gap-1.5 border border-[#30363d] rounded-md bg-[#161b22] px-2.5 py-1.5 focus-within:border-primary/50 transition-colors">
+            <Wifi className="w-3 h-3 text-[#484f58] shrink-0" />
+            <input
+              value={customUrl}
+              onChange={(e) => setCustomUrl(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") openInBrowser(); }}
+              placeholder="http://localhost:3000"
+              spellCheck={false}
+              className="flex-1 bg-transparent text-[11px] text-[#c9d1d9] outline-none placeholder:text-[#484f58] font-mono"
+            />
+          </div>
+          <button
+            onClick={openInBrowser}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary/90 hover:bg-primary text-primary-foreground text-[11px] font-medium transition-colors shrink-0"
+            title="Open in new tab"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            Open
+          </button>
+        </div>
+        <p className="text-[9px] text-[#484f58] mt-1.5">
+          Enter the port your dev server is running on, then click Open ↗
+        </p>
+      </div>
+
+      {/* Common ports quick pick */}
+      <div className="px-3 pb-3 shrink-0">
+        <p className="text-[9px] text-[#484f58] uppercase tracking-wider mb-1.5">Common ports</p>
+        <div className="flex flex-wrap gap-1.5">
+          {[
+            { label: "Next.js / Vite", port: 3000 },
+            { label: "Vite alt", port: 5173 },
+            { label: "React CRA", port: 3001 },
+            { label: "Node / Express", port: 8000 },
+            { label: "Django", port: 8080 },
+          ].map(({ label, port }) => (
+            <button
+              key={port}
+              onClick={() => setCustomUrl(`http://localhost:${port}`)}
+              className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                customUrl === `http://localhost:${port}`
+                  ? "border-primary/50 bg-primary/10 text-primary"
+                  : "border-[#30363d] text-[#8b949e] hover:text-[#c9d1d9] bg-[#161b22] hover:bg-[#21262d]"
+              }`}
+              title={label}
+            >
+              :{port}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── Shared Agent Log Content ─────────────────────────────────────────────────
+
 function LogContent({ agentLog, logEndRef }: {
   agentLog: { timestamp: string; type: string; text: string }[];
   logEndRef: React.RefObject<HTMLDivElement | null>;
@@ -89,6 +231,7 @@ function LogContent({ agentLog, logEndRef }: {
 }
 
 export function AgentWorkspacePanel() {
+
   const { projectName, projectMode, vfs, setVfs, activeFile, setActiveFile, agentLog } = useAgent();
   const [activeTab, setActiveTab] = useState("code");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -271,11 +414,8 @@ export function AgentWorkspacePanel() {
                     </div>
                   )}
                 </TabsContent>
-                <TabsContent value="preview" className="absolute inset-0 m-0 border-0 flex items-center justify-center bg-neutral-950 text-muted-foreground">
-                  <div className="text-center opacity-30 space-y-2">
-                    <MonitorPlay className="w-10 h-10 mx-auto" />
-                    <p className="text-xs">Export ZIP and run locally</p>
-                  </div>
+                <TabsContent value="preview" className="absolute inset-0 m-0 border-0">
+                  <PreviewTerminal projectName={projectName} />
                 </TabsContent>
 
                 {/* Log fullscreen tab content */}

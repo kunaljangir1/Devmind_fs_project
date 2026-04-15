@@ -23,7 +23,7 @@ interface Props {
 }
 
 export function ProjectInitModal({ onProjectCreated }: Props) {
-  const { projectMode, setProjectMode, setProjectName, setVfs, addLogEntry, setActiveFile } = useAgent();
+  const { projectMode, setProjectMode, setProjectName, setVfs, addLogEntry, setActiveFile, generateAndSaveContext } = useAgent();
   const [step, setStep] = useState<Step>("choose");
   const [nameInput, setNameInput] = useState("");
   const [selectedType, setSelectedType] = useState("next");
@@ -67,6 +67,18 @@ export function ProjectInitModal({ onProjectCreated }: Props) {
     setActiveFile(firstFile);
     addLogEntry(initialLog[0]);
     setProjectMode("scratch");
+
+    // Generate project context in the background after project is initialized
+    console.log(`[INIT] 🚀 Scratch project "${name}" created — starting context generation...`);
+    setLoadingMsg("Analyzing project structure...");
+    if (chatId) {
+      generateAndSaveContext(vfs, name).then((ctx) => {
+        if (ctx) {
+          console.log(`[INIT] ✅ Context ready for "${name}": ${ctx.purpose}`);
+        }
+      });
+    }
+
     if (chatId) onProjectCreated(chatId);
   };
 
@@ -105,6 +117,20 @@ export function ProjectInitModal({ onProjectCreated }: Props) {
       setActiveFile(firstFile);
       addLogEntry(initialLog[0]);
       setProjectMode("existing");
+
+      // Generate project context — crucial for existing projects the agent has never seen
+      console.log(`[INIT] 📂 Existing project "${dirHandle.name}" opened — starting context generation...`);
+      setLoadingMsg("Analyzing project structure and generating context...");
+      if (chatId) {
+        generateAndSaveContext(vfs, dirHandle.name).then((ctx) => {
+          if (ctx) {
+            console.log(`[INIT] ✅ Context ready for "${dirHandle.name}": ${ctx.purpose}`);
+            console.log(`[INIT] 🔧 Tech stack: [${ctx.techStack.join(", ")}]`);
+            console.log(`[INIT] 📋 Key files: [${ctx.keyFiles.join(", ")}]`);
+          }
+        });
+      }
+
       if (chatId) onProjectCreated(chatId);
     } catch (err: any) {
       if (err?.name !== "AbortError") alert("Could not open folder. Use Chrome or Edge.");

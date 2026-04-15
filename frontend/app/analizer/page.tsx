@@ -17,7 +17,7 @@
  * - Export all results dialog
  */
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import Link from "next/link";
 import {
     Brain,
@@ -35,6 +35,7 @@ import {
     Clock,
     CheckCircle2,
     XCircle,
+    History,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -74,6 +75,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { SeverityBadge } from "@/components/severity-badge";
 import { ModeToggle } from "@/components/mode-toggle";
 import { toast } from "sonner";
+import {
+    Sheet,
+    SheetContent,
+    SheetDescription,
+    SheetHeader,
+    SheetTitle,
+    SheetTrigger,
+} from "@/components/ui/sheet";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -99,6 +108,15 @@ const AGENT_META: Record<AgentId, { name: string; emoji: string; icon: typeof Za
     docs: { name: "Doc Generator", emoji: "📝", icon: FileText, color: "text-green-500" },
 };
 
+export interface HistoryRecord {
+    id: string;
+    date: string;
+    codeSnippet: string;
+    code: string;
+    agents: AgentResult[];
+    totalDuration: number | null;
+}
+
 const MAX_CODE_LENGTH = 4000;
 
 export default function AgentsPage() {
@@ -110,7 +128,68 @@ export default function AgentsPage() {
     const [dsaError, setDsaError] = useState<string | null>(null);
     const [totalDuration, setTotalDuration] = useState<number | null>(null);
     const [progress, setProgress] = useState(0);
+    const [history, setHistory] = useState<HistoryRecord[]>([]);
+    const [isHistoryOpen, setIsHistoryOpen] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    // Load persisted state on mount
+    useEffect(() => {
+        try {
+            const savedCode = localStorage.getItem("analyzer_code_state");
+            if (savedCode) setCode(savedCode);
+
+            const savedAgents = localStorage.getItem("analyzer_agents_state");
+            if (savedAgents) setAgents(JSON.parse(savedAgents));
+
+            const savedDuration = localStorage.getItem("analyzer_duration_state");
+            if (savedDuration) setTotalDuration(Number(savedDuration));
+
+            const savedHistory = localStorage.getItem("analyzer_history");
+            if (savedHistory) setHistory(JSON.parse(savedHistory));
+        } catch (e) {
+            console.error("Failed to recover analyzer state from localStorage", e);
+        }
+    }, []);
+
+    // Sync active code to localStorage
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            localStorage.setItem("analyzer_code_state", code);
+        }, 500);
+        return () => clearTimeout(timeoutId);
+    }, [code]);
+
+    // Sync agents and duration to localStorage and History on completion
+    useEffect(() => {
+        if (!isAnalyzing && agents.length > 0) {
+            localStorage.setItem("analyzer_agents_state", JSON.stringify(agents));
+            
+            if (totalDuration !== null) {
+                localStorage.setItem("analyzer_duration_state", String(totalDuration));
+                
+                // Add to history
+                const allFinished = agents.every(a => a.status === 'complete' || a.status === 'failed');
+                if (allFinished) {
+                    setHistory(prev => {
+                        const latest = prev[0];
+                        if (latest && latest.totalDuration === totalDuration && latest.code === code) return prev;
+                        
+                        const newRecord: HistoryRecord = {
+                            id: Date.now().toString(),
+                            date: new Date().toLocaleString(),
+                            codeSnippet: code.slice(0, 100) + (code.length > 100 ? '...' : ''),
+                            code,
+                            agents,
+                            totalDuration
+                        };
+                        const updated = [newRecord, ...prev].slice(0, 20); // Keep last 20 records
+                        localStorage.setItem("analyzer_history", JSON.stringify(updated));
+                        return updated;
+                    });
+                }
+            }
+        }
+    }, [isAnalyzing, agents, totalDuration, code]);
 
     /** Status badge variant based on agent status */
     const getStatusBadge = (status: AgentStatus) => {
@@ -314,6 +393,34 @@ export default function AgentsPage() {
         toast.success("Results exported as markdown");
     };
 
+    /** Download history record as markdown */
+    const downloadHistoryMd = (historyRecord: HistoryRecord) => {
+        const agentsPart = historyRecord.agents
+            .filter((a) => a.status === "complete")
+            .map((a) => `## ${a.emoji} ${a.name}\n\n${a.result}`)
+            .join("\n\n---\n\n");
+            
+        const markdown = `# DevMind Analysis History\n**Date:** ${historyRecord.date}\n\n## Input Code\n\`\`\`javascript\n${historyRecord.code}\n\`\`\`\n\n---\n\n${agentsPart}`;
+
+        const blob = new Blob([markdown], { type: "text/markdown" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `devmind-analysis-${historyRecord.id}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast.success("History log exported as markdown");
+    };
+
+    /** Load history record into view */
+    const loadHistory = (historyRecord: HistoryRecord) => {
+        setCode(historyRecord.code);
+        setAgents(historyRecord.agents);
+        setTotalDuration(historyRecord.totalDuration);
+        setIsHistoryOpen(false);
+        toast.success("Loaded history record");
+    };
+
     const completedAgents = agents.filter((a) => a.status === "complete");
     const hasResults = completedAgents.length > 0;
 
@@ -355,9 +462,53 @@ export default function AgentsPage() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
+                    <Sheet open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
+                        <SheetTrigger render={<Button variant="outline" size="sm" className="gap-1.5 hidden sm:flex" />}>
+                            <History className="h-4 w-4" />
+                            History
+                        </SheetTrigger>
+                        <SheetContent side="right" className="w-[400px] sm:w-[540px] overflow-y-auto">
+                            <SheetHeader>
+                                <SheetTitle>Analysis History</SheetTitle>
+                                <SheetDescription>
+                                    Your past {history.length} code analyses are securely saved in your browser.
+                                </SheetDescription>
+                            </SheetHeader>
+                            <div className="mt-6 flex flex-col gap-4">
+                                {history.length === 0 ? (
+                                    <div className="flex flex-col flex-1 items-center justify-center p-8 mt-10 opacity-50 space-y-4">
+                                        <History className="h-12 w-12 text-muted-foreground" />
+                                        <p className="text-sm text-center text-muted-foreground">Your history will appear here once you run an analysis.</p>
+                                    </div>
+                                ) : (
+                                    history.map(record => (
+                                        <Card key={record.id} className="p-3 transition-colors hover:bg-muted/30">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-xs font-semibold text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{record.date}</span>
+                                                <Tooltip>
+                                                    <TooltipTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => downloadHistoryMd(record)} />}>
+                                                        <FileDown className="h-4 w-4 text-muted-foreground" />
+                                                    </TooltipTrigger>
+                                                    <TooltipContent>Download MD</TooltipContent>
+                                                </Tooltip>
+                                            </div>
+                                            <pre className="p-2.5 bg-muted/50 rounded-md text-[10.5px] overflow-hidden whitespace-pre-wrap line-clamp-3 text-ellipsis mb-3 font-mono border border-border/50">
+                                                {record.codeSnippet}
+                                            </pre>
+                                            <div className="flex gap-2 w-full">
+                                                <Button className="w-full h-8 text-xs font-medium" variant="secondary" onClick={() => loadHistory(record)}>
+                                                    Open in Analyzer
+                                                </Button>
+                                            </div>
+                                        </Card>
+                                    ))
+                                )}
+                            </div>
+                        </SheetContent>
+                    </Sheet>
                     <HoverCard>
                         <HoverCardTrigger>
-                            <Badge variant="outline" className="cursor-help">
+                            <Badge variant="outline" className="cursor-help hidden md:inline-flex">
                                 4 Agents · Parallel
                             </Badge>
                         </HoverCardTrigger>
