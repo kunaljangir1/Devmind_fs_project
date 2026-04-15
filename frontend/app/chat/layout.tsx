@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { fetchWithAuth } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { MessageSquare, Plus, LogOut, Menu, PanelLeftClose, Trash2, Hammer, Pencil, Check, X } from "lucide-react";
+import { MessageSquare, Plus, LogOut, Menu, PanelLeftClose, Trash2, Hammer, Pencil, Check, X, Bot } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
@@ -243,12 +243,19 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
             </Button>
             <div className="font-semibold text-sm select-none">DevMind Enterprise</div>
           </div>
-          {/* Navigate to Agent route */}
-          <Link href="/agent">
-            <Button size="sm" variant="secondary" className="h-8 gap-1.5 text-xs bg-muted/60 hover:bg-muted font-medium text-foreground">
-              <Hammer size={13} className="text-primary" /> Open Environment
-            </Button>
-          </Link>
+          {/* Navigation Links */}
+          <div className="flex items-center gap-2">
+            <Link href="/analizer">
+              <Button size="sm" variant="ghost" className="h-8 gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/60">
+                <Bot size={13} className="text-primary" /> Analizer
+              </Button>
+            </Link>
+            <Link href="/agent">
+              <Button size="sm" variant="secondary" className="h-8 gap-1.5 text-xs bg-muted/60 hover:bg-muted font-medium text-foreground">
+                <Hammer size={13} className="text-primary" /> Open Environment
+              </Button>
+            </Link>
+          </div>
         </header>
         <div className="flex-1 overflow-hidden">
           {children}
