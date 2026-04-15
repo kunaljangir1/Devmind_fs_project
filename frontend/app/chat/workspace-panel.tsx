@@ -97,7 +97,7 @@ function TerminalLine({ entry }: { entry: { timestamp: string; type: string; tex
 // ─────────────────────────────────────────
 function LogContent({ agentLog, logEndRef }: {
   agentLog: { timestamp: string; type: string; text: string }[];
-  logEndRef: React.RefObject<HTMLDivElement>;
+  logEndRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div className="flex-1 overflow-y-auto overflow-x-hidden">
@@ -308,13 +308,14 @@ export function WorkspacePanel() {
                     className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-[#8b949e] rounded-none px-1.5 h-full text-[11px] font-medium uppercase tracking-wider text-[#8b949e] data-[state=active]:text-[#c9d1d9] flex items-center gap-1.5"
                   >
                     <Terminal className="w-3.5 h-3.5" /> Log
-                    <button
+                    <div
+                      role="button"
                       onClick={closeLogFullscreen}
-                      className="ml-1 rounded-sm p-0.5 hover:bg-white/10 transition-colors"
+                      className="ml-1 rounded-sm p-0.5 hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center pointer-events-auto"
                       title="Close fullscreen log"
                     >
                       <X className="w-3 h-3" />
-                    </button>
+                    </div>
                   </TabsTrigger>
                 )}
               </TabsList>
